@@ -194,6 +194,76 @@ class ProjectionStore:
             )
 
         return applied_count
+    def consume_from_ledger_db(
+        self,
+        ledger_db_path: Path | str,
+        batch_size: int = 100,
+        knowledge_time: datetime | None = None,
+    ) -> int:
+        """Poll and ingest unconsumed events directly from a Rust ObservationLedger SQLite database.
+
+        Enforces C4: ordered tail ingestion from current consumer offset without skipping or duplicates.
+        """
+        db_path = Path(ledger_db_path)
+        if not db_path.exists():
+            return 0
+
+        # Open read-only connection to ledger db
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            # Discover ledger_id
+            cur = conn.execute("SELECT ledger_id FROM ledger_meta LIMIT 1")
+            row = cur.fetchone()
+            if not row:
+                return 0
+            ledger_id = row["ledger_id"]
+
+            current_offset = self.get_offset(ledger_id)
+
+            cur = conn.execute(
+                """
+                SELECT seq, event_id, schema_version, ledger_id, kind, instrument_id,
+                       wallet_id, event_time, received_at, known_at, before_revision,
+                       after_revision, payload, quality
+                FROM outbox_events
+                WHERE seq > ?
+                ORDER BY seq ASC
+                LIMIT ?
+                """,
+                (current_offset, batch_size),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return 0
+
+            events: list[dict[str, Any]] = []
+            for r in rows:
+                raw_payload = r["payload"]
+                try:
+                    payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+
+                events.append({
+                    "schema_version": r["schema_version"],
+                    "event_id": r["event_id"],
+                    "cursor": {"ledger_id": r["ledger_id"], "seq": r["seq"]},
+                    "kind": r["kind"],
+                    "instrument_id": r["instrument_id"],
+                    "wallet_id": r["wallet_id"],
+                    "event_time": r["event_time"],
+                    "received_at": r["received_at"],
+                    "known_at": r["known_at"],
+                    "before_revision": r["before_revision"],
+                    "after_revision": r["after_revision"],
+                    "payload": payload,
+                    "quality": r["quality"],
+                })
+
+            return self.apply_canonical_events(ledger_id, events, knowledge_time=knowledge_time)
+        finally:
+            conn.close()
 
     def get_position(self, wallet_id: str, coin: str) -> ProjectedPosition | None:
         cur = self.conn.execute(
