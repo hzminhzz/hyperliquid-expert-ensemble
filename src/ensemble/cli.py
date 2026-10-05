@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .checkpoint import JobStore
+from .explain import explain_blocker, explain_target
 from .projection import ProjectionStore
 
 # Authoritative implemented capabilities at S3
@@ -47,6 +48,22 @@ IMPLEMENTED_CAPABILITIES = {
             "name": "evidence lookup",
             "family": "evidence",
             "purpose": "Look up content-addressed evidence capsule by ID",
+            "cost_class": "free",
+            "authority": "operator",
+            "status": "implemented",
+        },
+        {
+            "name": "explain target",
+            "family": "explain",
+            "purpose": "Produce causal accounting explanation for a consensus target",
+            "cost_class": "free",
+            "authority": "operator",
+            "status": "implemented",
+        },
+        {
+            "name": "explain blocker",
+            "family": "explain",
+            "purpose": "Return root-cause explanation and remediation for a blocker",
             "cost_class": "free",
             "authority": "operator",
             "status": "implemented",
@@ -198,12 +215,19 @@ def main() -> None:
     changes_p = inspect_sub.add_parser("changes", help="Inspect changes")
     changes_p.add_argument("--since", type=int, default=0, help="Since sequence")
 
+    # explain
+    explain_parser = subparsers.add_parser("explain", help="Explanation commands")
+    explain_sub = explain_parser.add_subparsers(dest="subcommand")
+    target_p = explain_sub.add_parser("target", help="Explain consensus target")
+    target_p.add_argument("coin", help="Coin ticker")
+    blocker_p = explain_sub.add_parser("blocker", help="Explain blocker code")
+    blocker_p.add_argument("code", help="Blocker code")
+
     # evidence
     evidence_parser = subparsers.add_parser("evidence", help="Evidence commands")
     evidence_sub = evidence_parser.add_subparsers(dest="subcommand")
     lookup_p = evidence_sub.add_parser("lookup", help="Evidence lookup")
     lookup_p.add_argument("id", help="Evidence ID")
-
     args = parser.parse_args()
 
     if args.command == "inspect":
@@ -215,6 +239,22 @@ def main() -> None:
         elif args.subcommand == "changes":
             store = ProjectionStore(":memory:")
             print(json.dumps(cmd_inspect_changes(store, args.since), indent=2))
+    elif args.command == "explain":
+        if args.subcommand == "blocker":
+            print(json.dumps(explain_blocker(args.code), indent=2))
+        elif args.subcommand == "target":
+            from decimal import Decimal
+
+            from .consensus import compute_equal_budget_consensus
+            from .posture import compute_posture
+
+            store = ProjectionStore(":memory:")
+            pos = store.get_position("0xexpert", args.coin)
+            p = compute_posture(
+                "0xexpert", args.coin, pos.szi if pos else Decimal(0), Decimal(100), Decimal(1000)
+            )
+            target = compute_equal_budget_consensus(args.coin, [p])
+            print(json.dumps(explain_target(target), indent=2))
     elif args.command == "evidence" and args.subcommand == "lookup":
         print(json.dumps(cmd_evidence_lookup(args.id), indent=2))
     else:
