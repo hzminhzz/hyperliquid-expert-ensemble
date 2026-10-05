@@ -168,3 +168,109 @@ def compute_equal_budget_consensus(
         blocker_code=blocker_code,
         as_of=now,
     )
+
+
+def compute_hierarchical_cluster_consensus(
+    coin: str,
+    postures: list[ExpertPosture],
+    clusters: list[list[str]],
+    cause: CausalChangeCategory = CausalChangeCategory.ECONOMIC_CHANGE,
+    as_of: datetime | None = None,
+) -> ConsensusTarget:
+    """Compute clone-resistant candidate B2 hierarchical consensus (R3, Q11).
+
+    Formula:
+      C(a) = sum_g b(g) * sum_{i in g} a(i|g) * s(i, a)
+      where b(g) = 1 / |G|, a(i|g) = 1 / |g|
+      Effective weight w_i = 1 / (|G| * |g|)
+
+    Clone resistance guarantee:
+      Cloned duplicate experts in cluster g share budget b(g).
+      Adding K identical clones cannot inflate the cluster's aggregate voting weight.
+    """
+    now = as_of or datetime.now(UTC)
+    if not clusters or not postures:
+        return compute_equal_budget_consensus(coin, postures, cause=cause, as_of=now)
+
+    postures_by_id = {p.expert_id: p for p in postures}
+    cluster_count = len(clusters)
+    cluster_budget = Decimal("1.0") / Decimal(str(cluster_count))
+
+    observed_target = Decimal("0.0")
+    missing_mass = Decimal("0.0")
+    contributions = []
+
+    for cluster in clusters:
+        member_count = len(cluster)
+        if member_count == 0:
+            continue
+        member_share = Decimal("1.0") / Decimal(str(member_count))
+        expert_weight = cluster_budget * member_share
+
+        for expert_id in cluster:
+            p = postures_by_id.get(expert_id)
+            if not p:
+                missing_mass += expert_weight
+                continue
+
+            if p.state in (EligibilityState.ELIGIBLE, EligibilityState.KNOWN_FLAT):
+                w_contrib = p.clipped_posture * expert_weight
+                observed_target += w_contrib
+                contributions.append(
+                    ExpertContribution(
+                        expert_id=expert_id,
+                        raw_posture=p.clipped_posture,
+                        weight=expert_weight,
+                        weighted_contribution=w_contrib,
+                        state=p.state,
+                        reason=p.reason,
+                    )
+                )
+            elif p.state == EligibilityState.UNAVAILABLE:
+                missing_mass += expert_weight
+                contributions.append(
+                    ExpertContribution(
+                        expert_id=expert_id,
+                        raw_posture=Decimal("0.0"),
+                        weight=expert_weight,
+                        weighted_contribution=Decimal("0.0"),
+                        state=p.state,
+                        reason=p.reason,
+                    )
+                )
+            else:
+                contributions.append(
+                    ExpertContribution(
+                        expert_id=expert_id,
+                        raw_posture=Decimal("0.0"),
+                        weight=expert_weight,
+                        weighted_contribution=Decimal("0.0"),
+                        state=p.state,
+                        reason=p.reason,
+                    )
+                )
+
+    lower_bound = max(Decimal("-1.0"), min(Decimal("1.0"), observed_target - missing_mass))
+    upper_bound = max(Decimal("-1.0"), min(Decimal("1.0"), observed_target + missing_mass))
+
+    is_actionable = True
+    blocker_code = None
+    if missing_mass >= Decimal("0.5"):
+        is_actionable = False
+        blocker_code = "INSUFFICIENT_COVERAGE"
+    elif lower_bound < Decimal(0) < upper_bound and observed_target != Decimal(0):
+        is_actionable = False
+        blocker_code = "AMBIGUOUS_BOUNDS"
+
+    return ConsensusTarget(
+        coin=coin,
+        observed_target=observed_target,
+        missing_mass=missing_mass,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+        cause=cause,
+        contributions=contributions,
+        is_actionable=is_actionable,
+        blocker_code=blocker_code,
+        as_of=now,
+    )
