@@ -136,3 +136,16 @@ class JobStore:
         if updated_job is None:
             raise RuntimeError(f"Job {job_id} could not be retrieved after execution")
         return updated_job
+
+    def cancel_job(self, job_id: str) -> EvaluationJob:
+        """Cancel an evaluation job."""
+        now = datetime.now(UTC).isoformat()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE evaluation_jobs SET status = 'CANCELLED', updated_at = ? WHERE job_id = ?",
+                (now, job_id),
+            )
+        job = self.get_job(job_id)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        return job
