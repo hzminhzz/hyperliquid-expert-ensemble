@@ -69,6 +69,22 @@ IMPLEMENTED_CAPABILITIES = {
             "status": "implemented",
         },
         {
+            "name": "plan",
+            "family": "plan",
+            "purpose": "Create typed immutable proposal with expected preconditions",
+            "cost_class": "free",
+            "authority": "operator",
+            "status": "implemented",
+        },
+        {
+            "name": "apply",
+            "family": "apply",
+            "purpose": "Apply an approved plan idempotently with expected revision",
+            "cost_class": "free",
+            "authority": "runtime_operator",
+            "status": "implemented",
+        },
+        {
             "name": "evaluate",
             "family": "evaluate",
             "purpose": "Execute isolated deterministic replay over pinned manifest",
@@ -211,7 +227,7 @@ def main() -> None:
 
     inspect_sub.add_parser("capabilities", help="Inspect capabilities")
     inspect_sub.add_parser("system", help="Inspect system briefing")
-
+    inspect_sub.add_parser("handoff", help="Inspect compact handoff brief")
     changes_p = inspect_sub.add_parser("changes", help="Inspect changes")
     changes_p.add_argument("--since", type=int, default=0, help="Since sequence")
 
@@ -228,6 +244,17 @@ def main() -> None:
     evidence_sub = evidence_parser.add_subparsers(dest="subcommand")
     lookup_p = evidence_sub.add_parser("lookup", help="Evidence lookup")
     lookup_p.add_argument("id", help="Evidence ID")
+
+    # plan
+    plan_parser = subparsers.add_parser("plan", help="Create typed proposal plan")
+    plan_parser.add_argument("--scope", default="default", help="Scope")
+    plan_parser.add_argument("--intent", default="repair", help="Intent")
+    plan_parser.add_argument("--revision", type=int, default=1, help="Expected revision")
+
+    # apply
+    apply_parser = subparsers.add_parser("apply", help="Apply approved plan")
+    apply_parser.add_argument("--plan", required=True, help="Plan ID")
+    apply_parser.add_argument("--key", required=True, help="Idempotency key")
     args = parser.parse_args()
 
     if args.command == "inspect":
@@ -239,6 +266,16 @@ def main() -> None:
         elif args.subcommand == "changes":
             store = ProjectionStore(":memory:")
             print(json.dumps(cmd_inspect_changes(store, args.since), indent=2))
+        elif args.subcommand == "handoff":
+            from .handoff import generate_compact_handoff
+
+            handoff = generate_compact_handoff(
+                revision=1,
+                applied_state={"mode": "advisory"},
+                unresolved_blockers=[],
+                active_jobs=[],
+            )
+            print(json.dumps(handoff.to_brief(), indent=2))
     elif args.command == "explain":
         if args.subcommand == "blocker":
             print(json.dumps(explain_blocker(args.code), indent=2))
