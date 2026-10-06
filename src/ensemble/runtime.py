@@ -37,6 +37,9 @@ class RuntimeSettings:
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     telegram_chat_id_path: Path = Path("/home/quant/.local/share/copytrade/telegram-chat-id")
+    telegram_update_offset_path: Path = Path(
+        "/home/quant/.local/share/copytrade/telegram-update-offset"
+    )
     telegram_pair_code: str | None = None
 
     @classmethod
@@ -78,6 +81,12 @@ class RuntimeSettings:
                 os.getenv(
                     "ENSEMBLE_TELEGRAM_CHAT_ID_PATH",
                     "/home/quant/.local/share/copytrade/telegram-chat-id",
+                )
+            ),
+            telegram_update_offset_path=Path(
+                os.getenv(
+                    "ENSEMBLE_TELEGRAM_UPDATE_OFFSET_PATH",
+                    "/home/quant/.local/share/copytrade/telegram-update-offset",
                 )
             ),
             telegram_pair_code=os.getenv("ENSEMBLE_TELEGRAM_PAIR_CODE") or None,
@@ -179,49 +188,40 @@ def _ledger_status(path: Path) -> dict[str, Any]:
         conn.close()
 
 
-def _discover_telegram_chat(settings: RuntimeSettings) -> str | None:
+def _load_paired_telegram_chat(settings: RuntimeSettings) -> str | None:
     if settings.telegram_chat_id:
         return settings.telegram_chat_id
-    if settings.telegram_chat_id_path.exists():
-        value = settings.telegram_chat_id_path.read_text(encoding="utf-8").strip()
-        if value:
-            settings.telegram_chat_id = value
-            return value
-    if not settings.telegram_bot_token or not settings.telegram_pair_code:
+    if not settings.telegram_chat_id_path.exists():
         return None
+    value = settings.telegram_chat_id_path.read_text(encoding="utf-8").strip()
+    if not value:
+        return None
+    settings.telegram_chat_id = value
+    return value
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/getUpdates"
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+def _load_telegram_update_offset(settings: RuntimeSettings) -> int:
+    if not settings.telegram_update_offset_path.exists():
+        return 0
+    raw = settings.telegram_update_offset_path.read_text(encoding="utf-8").strip()
     try:
-        with urllib.request.urlopen(request, timeout=10.0) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
-    expected = f"/pair {settings.telegram_pair_code}"
-    for update in reversed(data.get("result", [])):
-        message = update.get("message") or update.get("edited_message")
-        if not isinstance(message, dict) or message.get("text") != expected:
-            continue
-        chat = message.get("chat")
-        if not isinstance(chat, dict) or chat.get("id") is None:
-            continue
-        chat_id = str(chat["id"])
-        settings.telegram_chat_id_path.parent.mkdir(parents=True, exist_ok=True)
-        settings.telegram_chat_id_path.write_text(chat_id, encoding="utf-8")
-        os.chmod(settings.telegram_chat_id_path, 0o600)
-        settings.telegram_chat_id = chat_id
-        LOG.info("telegram advisory destination paired")
-        return chat_id
-    return None
+        return int(raw)
+    except ValueError:
+        LOG.warning("invalid Telegram update offset %r; resetting to 0", raw)
+        return 0
 
 
-def _send_telegram(settings: RuntimeSettings, text: str) -> bool:
-    if not settings.telegram_bot_token or not _discover_telegram_chat(settings):
+def _save_telegram_update_offset(settings: RuntimeSettings, offset: int) -> None:
+    settings.telegram_update_offset_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.telegram_update_offset_path.write_text(str(offset), encoding="utf-8")
+    os.chmod(settings.telegram_update_offset_path, 0o600)
+
+
+def _send_telegram_to_chat(settings: RuntimeSettings, chat_id: str, text: str) -> bool:
+    if not settings.telegram_bot_token:
         return False
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
-    payload = urllib.parse.urlencode(
-        {"chat_id": settings.telegram_chat_id, "text": text}
-    ).encode("utf-8")
+    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=payload,
@@ -235,6 +235,94 @@ def _send_telegram(settings: RuntimeSettings, text: str) -> bool:
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         LOG.warning("telegram delivery failed: %s", exc)
         return False
+
+
+def _send_telegram(settings: RuntimeSettings, text: str) -> bool:
+    chat_id = _load_paired_telegram_chat(settings)
+    if not chat_id:
+        return False
+    return _send_telegram_to_chat(settings, chat_id, text)
+
+
+def _poll_telegram_commands(settings: RuntimeSettings, status_text: str) -> None:
+    if not settings.telegram_bot_token:
+        return
+
+    offset = _load_telegram_update_offset(settings)
+    query = urllib.parse.urlencode({"offset": offset, "timeout": 0})
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/getUpdates?{query}"
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=10.0) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        LOG.warning("telegram command poll failed: %s", exc)
+        return
+
+    updates = data.get("result", [])
+    if not isinstance(updates, list):
+        return
+
+    next_offset = offset
+    for update in updates:
+        if not isinstance(update, dict):
+            continue
+        update_id = update.get("update_id")
+        if isinstance(update_id, int):
+            next_offset = max(next_offset, update_id + 1)
+
+        message = update.get("message") or update.get("edited_message")
+        if not isinstance(message, dict):
+            continue
+        text = str(message.get("text") or "").strip()
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or chat.get("id") is None:
+            continue
+        chat_id = str(chat["id"])
+
+        expected_pair = (
+            f"/pair {settings.telegram_pair_code}" if settings.telegram_pair_code else None
+        )
+        if expected_pair and text == expected_pair:
+            paired = _load_paired_telegram_chat(settings)
+            if paired is None or paired == chat_id:
+                settings.telegram_chat_id_path.parent.mkdir(parents=True, exist_ok=True)
+                settings.telegram_chat_id_path.write_text(chat_id, encoding="utf-8")
+                os.chmod(settings.telegram_chat_id_path, 0o600)
+                settings.telegram_chat_id = chat_id
+                _send_telegram_to_chat(
+                    settings,
+                    chat_id,
+                    "Paired. The advisory runtime is live; financial execution is disabled. "
+                    "Send /status for the current system state or /help for commands.",
+                )
+                LOG.info("telegram advisory destination paired and acknowledged")
+            continue
+
+        paired_chat = _load_paired_telegram_chat(settings)
+        if paired_chat != chat_id:
+            continue
+
+        if text == "/status":
+            _send_telegram_to_chat(settings, chat_id, status_text)
+        elif text == "/help":
+            _send_telegram_to_chat(
+                settings,
+                chat_id,
+                "Commands:\n/status — current advisory runtime state\n"
+                "/help — this message\n"
+                "Financial execution is disabled in V1.",
+            )
+        elif text:
+            _send_telegram_to_chat(
+                settings,
+                chat_id,
+                "Advisory bot is online. Send /status or /help. "
+                "Financial execution is disabled.",
+            )
+
+    if next_offset != offset:
+        _save_telegram_update_offset(settings, next_offset)
 
 
 def _format_target(target: ConsensusTarget) -> str:
@@ -345,6 +433,27 @@ class EnsembleRuntime:
                 )
         self.prior_targets = targets
 
+    def telegram_status_text(self, targets: dict[str, ConsensusTarget]) -> str:
+        ledger = _ledger_status(self.settings.ledger_db)
+        ledger_id = ledger.get("ledger_id")
+        consumed = self.store.get_offset(str(ledger_id)) if ledger_id else 0
+        ledger_seq = int(ledger.get("current_seq", 0))
+        target_lines = [
+            f"{coin}: {target.observed_target:+.3f}"
+            for coin, target in sorted(targets.items())
+        ]
+        return "\n".join(
+            [
+                "Advisory runtime: ONLINE",
+                f"Experts: {len(self.settings.experts)}",
+                f"Open positions: {len(self.store.list_positions())}",
+                f"Ledger: {consumed}/{ledger_seq} (lag {max(0, ledger_seq - consumed)})",
+                "Targets:",
+                *(target_lines or ["none"]),
+                "Execution: FINANCIAL_EFFECT_FORBIDDEN",
+            ]
+        )
+
     def write_health(self, targets: dict[str, ConsensusTarget]) -> None:
         ledger = _ledger_status(self.settings.ledger_db)
         ledger_id = ledger.get("ledger_id")
@@ -398,7 +507,6 @@ class EnsembleRuntime:
 
     def step(self) -> None:
         now = time.monotonic()
-        _discover_telegram_chat(self.settings)
         if now - self.last_snapshot_at >= self.settings.snapshot_refresh_s:
             self.refresh_snapshots()
             self.last_snapshot_at = now
@@ -411,6 +519,7 @@ class EnsembleRuntime:
 
         targets = self.compute_targets()
         self.maybe_notify(targets)
+        _poll_telegram_commands(self.settings, self.telegram_status_text(targets))
         self.last_error = None
         self.write_health(targets)
 
