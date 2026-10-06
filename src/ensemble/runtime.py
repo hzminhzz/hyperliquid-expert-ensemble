@@ -16,7 +16,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from .consensus import ConsensusTarget, compute_equal_budget_consensus
+from .consensus import (
+    ConsensusTarget,
+    compute_equal_budget_consensus,
+    compute_hierarchical_cluster_consensus,
+)
 from .posture import compute_posture
 from .projection import ProjectionStore
 
@@ -30,6 +34,7 @@ class RuntimeSettings:
     projection_db: Path
     health_path: Path
     experts: list[str]
+    cluster_manifest_path: Path | None = None
     poll_interval_s: float = 1.0
     market_refresh_s: float = 5.0
     target_change_threshold: Decimal = Decimal("0.05")
@@ -68,6 +73,11 @@ class RuntimeSettings:
                 )
             ),
             experts=experts,
+            cluster_manifest_path=(
+                Path(os.environ["ENSEMBLE_CLUSTER_MANIFEST"])
+                if os.getenv("ENSEMBLE_CLUSTER_MANIFEST")
+                else None
+            ),
             poll_interval_s=float(os.getenv("ENSEMBLE_POLL_INTERVAL_S", "1")),
             market_refresh_s=float(os.getenv("ENSEMBLE_MARKET_REFRESH_S", "5")),
             target_change_threshold=Decimal(
@@ -103,6 +113,41 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float = 15.0) -> Any:
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _load_cluster_manifest(
+    path: Path | None, experts: list[str]
+) -> list[list[str]] | None:
+    if path is None:
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_clusters = payload.get("clusters") if isinstance(payload, dict) else None
+    if not isinstance(raw_clusters, list) or not raw_clusters:
+        raise ValueError("cluster manifest must contain a non-empty clusters list")
+
+    expected = set(experts)
+    seen: set[str] = set()
+    clusters: list[list[str]] = []
+    for raw_cluster in raw_clusters:
+        if not isinstance(raw_cluster, list) or not raw_cluster:
+            raise ValueError("cluster manifest contains an empty/invalid cluster")
+        cluster: list[str] = []
+        for raw_wallet in raw_cluster:
+            wallet = str(raw_wallet).strip().lower()
+            if wallet not in expected:
+                raise ValueError(f"cluster manifest contains unknown expert {wallet}")
+            if wallet in seen:
+                raise ValueError(f"cluster manifest duplicates expert {wallet}")
+            seen.add(wallet)
+            cluster.append(wallet)
+        clusters.append(cluster)
+
+    missing = expected - seen
+    if missing:
+        raise ValueError(
+            f"cluster manifest omits {len(missing)} configured expert(s)"
+        )
+    return clusters
 
 
 def fetch_all_mids() -> dict[str, Decimal]:
@@ -298,6 +343,9 @@ class EnsembleRuntime:
         self.settings.projection_db.parent.mkdir(parents=True, exist_ok=True)
         self.settings.health_path.parent.mkdir(parents=True, exist_ok=True)
         self.store = ProjectionStore(settings.projection_db)
+        self.clusters = _load_cluster_manifest(
+            settings.cluster_manifest_path, settings.experts
+        )
         self.mids: dict[str, Decimal] = {}
         self.prior_targets: dict[str, ConsensusTarget] = {}
         self.last_market_at = 0.0
@@ -347,9 +395,14 @@ class EnsembleRuntime:
                         equity_age_minutes=equity_age,
                     )
                 )
-            targets[instrument_id] = compute_equal_budget_consensus(
-                instrument_id, postures, as_of=now
-            )
+            if self.clusters is None:
+                targets[instrument_id] = compute_equal_budget_consensus(
+                    instrument_id, postures, as_of=now
+                )
+            else:
+                targets[instrument_id] = compute_hierarchical_cluster_consensus(
+                    instrument_id, postures, self.clusters, as_of=now
+                )
         return targets
 
     def maybe_notify(self, targets: dict[str, ConsensusTarget]) -> None:
@@ -389,6 +442,7 @@ class EnsembleRuntime:
             [
                 "Advisory runtime: ONLINE",
                 f"Experts: {len(self.settings.experts)}",
+                f"Clusters: {len(self.clusters) if self.clusters is not None else 'equal-wallet'}",
                 f"Open positions: {len(self.store.list_positions())}",
                 f"Ledger: {consumed}/{ledger_seq} (lag {max(0, ledger_seq - consumed)})",
                 "Targets:",
@@ -419,6 +473,8 @@ class EnsembleRuntime:
             },
             "experts": {
                 "configured": len(self.settings.experts),
+                "cluster_mode": "hierarchical" if self.clusters is not None else "equal-wallet",
+                "clusters": len(self.clusters) if self.clusters is not None else None,
                 "with_equity": sum(
                     self.store.get_equity(w) is not None for w in self.settings.experts
                 ),
@@ -467,8 +523,9 @@ class EnsembleRuntime:
         if not self.settings.experts:
             raise RuntimeError("ENSEMBLE_EXPERTS is empty")
         LOG.info(
-            "starting advisory runtime with %d experts; financial execution forbidden",
+            "starting advisory runtime with %d experts across %s clusters; financial execution forbidden",
             len(self.settings.experts),
+            len(self.clusters) if self.clusters is not None else "equal-wallet",
         )
         while True:
             try:
