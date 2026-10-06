@@ -26,6 +26,21 @@ from .projection import ProjectionStore
 
 LOG = logging.getLogger("ensemble.runtime")
 USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0"
+TELEGRAM_SAFE_MAX_CHARS = 3500
+
+
+@dataclass(slots=True, frozen=True)
+class AdvisoryAssessment:
+    direction: str
+    grade: str
+    follow_state: str
+    shadow_risk_cap: Decimal
+    coverage: Decimal
+    agreement: Decimal | None
+    support_clusters: int
+    oppose_clusters: int
+    flat_clusters: int
+    rationale: str
 
 
 @dataclass(slots=True)
@@ -223,6 +238,13 @@ def _save_telegram_update_offset(settings: RuntimeSettings, offset: int) -> None
 def _send_telegram_to_chat(settings: RuntimeSettings, chat_id: str, text: str) -> bool:
     if not settings.telegram_bot_token:
         return False
+    if len(text) > TELEGRAM_SAFE_MAX_CHARS:
+        LOG.warning(
+            "telegram message truncated from %d to %d characters",
+            len(text),
+            TELEGRAM_SAFE_MAX_CHARS,
+        )
+        text = text[: TELEGRAM_SAFE_MAX_CHARS - 1] + "…"
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
     payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
     request = urllib.request.Request(
@@ -235,7 +257,7 @@ def _send_telegram_to_chat(settings: RuntimeSettings, chat_id: str, text: str) -
         with urllib.request.urlopen(request, timeout=15.0) as response:
             data = json.loads(response.read().decode("utf-8"))
         return bool(data.get("ok"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         LOG.warning("telegram delivery failed: %s", exc)
         return False
 
@@ -258,7 +280,7 @@ def _poll_telegram_commands(settings: RuntimeSettings, status_text: str) -> None
     try:
         with urllib.request.urlopen(request, timeout=10.0) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         LOG.warning("telegram command poll failed: %s", exc)
         return
 
@@ -328,17 +350,189 @@ def _poll_telegram_commands(settings: RuntimeSettings, status_text: str) -> None
         _save_telegram_update_offset(settings, next_offset)
 
 
-def _format_target(target: ConsensusTarget) -> str:
-    votes = ", ".join(
-        f"{c.expert_id[:8]}={c.raw_posture:+.2f}"
-        for c in target.contributions
+def _cluster_values(
+    target: ConsensusTarget, clusters: list[list[str]] | None
+) -> list[Decimal]:
+    by_expert = {c.expert_id: c for c in target.contributions}
+    if clusters is None:
+        return [c.weighted_contribution for c in target.contributions]
+    values: list[Decimal] = []
+    for cluster in clusters:
+        values.append(
+            sum(
+                (
+                    by_expert[expert_id].weighted_contribution
+                    for expert_id in cluster
+                    if expert_id in by_expert
+                ),
+                start=Decimal(0),
+            )
+        )
+    return values
+
+
+def _assess_target(
+    target: ConsensusTarget, clusters: list[list[str]] | None
+) -> AdvisoryAssessment:
+    direction_sign = 1 if target.observed_target > 0 else -1 if target.observed_target < 0 else 0
+    direction = "LONG" if direction_sign > 0 else "SHORT" if direction_sign < 0 else "FLAT"
+    values = _cluster_values(target, clusters)
+    if direction_sign > 0:
+        support = [value for value in values if value > 0]
+        oppose = [value for value in values if value < 0]
+    elif direction_sign < 0:
+        support = [value for value in values if value < 0]
+        oppose = [value for value in values if value > 0]
+    else:
+        support, oppose = [], []
+    flat_clusters = len(values) - len(support) - len(oppose)
+    support_signal = sum((abs(v) for v in support), start=Decimal(0))
+    oppose_signal = sum((abs(v) for v in oppose), start=Decimal(0))
+    directional_signal = support_signal + oppose_signal
+    agreement = (
+        support_signal / directional_signal if directional_signal > 0 else None
     )
-    actionable = "ACTIONABLE" if target.is_actionable else f"BLOCKED:{target.blocker_code}"
-    return (
-        f"Expert consensus · {target.coin}\n"
-        f"Target {target.observed_target:+.3f}  [{target.lower_bound:+.3f}, {target.upper_bound:+.3f}]\n"
-        f"Coverage missing {target.missing_mass:.3f} · {actionable}\n"
-        f"{votes}"
+    coverage = max(Decimal(0), min(Decimal(1), Decimal(1) - target.missing_mass))
+
+    if not target.is_actionable:
+        reason = {
+            "AMBIGUOUS_BOUNDS": "uncertainty interval crosses zero",
+            "INSUFFICIENT_COVERAGE": "too much cluster weight is unavailable",
+        }.get(target.blocker_code or "", target.blocker_code or "consensus gate blocked")
+        return AdvisoryAssessment(
+            direction=direction,
+            grade="BLOCKED",
+            follow_state="NO-FOLLOW",
+            shadow_risk_cap=Decimal(0),
+            coverage=coverage,
+            agreement=agreement,
+            support_clusters=len(support),
+            oppose_clusters=len(oppose),
+            flat_clusters=flat_clusters,
+            rationale=reason,
+        )
+
+    if direction_sign == 0 or agreement is None:
+        return AdvisoryAssessment(
+            direction=direction,
+            grade="D",
+            follow_state="IGNORE",
+            shadow_risk_cap=Decimal(0),
+            coverage=coverage,
+            agreement=agreement,
+            support_clusters=len(support),
+            oppose_clusters=len(oppose),
+            flat_clusters=flat_clusters,
+            rationale="no directional cluster consensus",
+        )
+
+    strength = abs(target.observed_target)
+    if (
+        strength >= Decimal("0.12")
+        and agreement >= Decimal("0.80")
+        and coverage >= Decimal("0.95")
+        and len(support) >= 4
+    ):
+        grade, state, cap, rationale = (
+            "A",
+            "PAPER-FOLLOW",
+            Decimal("0.50"),
+            "strong cluster-adjusted consensus with broad directional agreement",
+        )
+    elif (
+        strength >= Decimal("0.07")
+        and agreement >= Decimal("0.70")
+        and coverage >= Decimal("0.90")
+        and len(support) >= 3
+    ):
+        grade, state, cap, rationale = (
+            "B",
+            "PAPER-FOLLOW",
+            Decimal("0.25"),
+            "moderate cluster-adjusted consensus with good directional agreement",
+        )
+    elif (
+        strength >= Decimal("0.035")
+        and agreement >= Decimal("0.60")
+        and coverage >= Decimal("0.85")
+        and len(support) >= 2
+    ):
+        grade, state, cap, rationale = (
+            "C",
+            "WATCH",
+            Decimal("0.10"),
+            "weak but coherent cluster consensus; monitor rather than chase",
+        )
+    else:
+        grade, state, cap, rationale = (
+            "D",
+            "IGNORE",
+            Decimal(0),
+            "consensus is too small, narrow, or conflicted",
+        )
+
+    return AdvisoryAssessment(
+        direction=direction,
+        grade=grade,
+        follow_state=state,
+        shadow_risk_cap=cap,
+        coverage=coverage,
+        agreement=agreement,
+        support_clusters=len(support),
+        oppose_clusters=len(oppose),
+        flat_clusters=flat_clusters,
+        rationale=rationale,
+    )
+
+
+def _price_text(price: Decimal | None) -> str:
+    if price is None or price <= 0:
+        return "n/a"
+    if price >= Decimal(100):
+        return f"${price:,.2f}"
+    if price >= Decimal(1):
+        return f"${price:,.4f}"
+    return f"${price:,.6f}"
+
+
+def _format_target(
+    target: ConsensusTarget,
+    clusters: list[list[str]] | None,
+    mark: Decimal | None,
+) -> str:
+    assessment = _assess_target(target, clusters)
+    symbol = target.coin.rsplit(":", 1)[-1]
+    emoji = "🟢" if assessment.direction == "LONG" else "🔴" if assessment.direction == "SHORT" else "⚪"
+    agreement = (
+        f"{assessment.agreement * Decimal(100):.0f}%"
+        if assessment.agreement is not None
+        else "n/a"
+    )
+    coverage = f"{assessment.coverage * Decimal(100):.0f}%"
+    shadow = (
+        f"{assessment.shadow_risk_cap:.2f}R"
+        if assessment.shadow_risk_cap > 0
+        else "0R"
+    )
+    return "\n".join(
+        [
+            f"{emoji} CLUSTER CONSENSUS · {symbol} · {assessment.direction}",
+            f"Status: {assessment.follow_state} · Grade {assessment.grade}",
+            f"Shadow risk cap: {shadow} · Live size: NOT QUALIFIED",
+            "",
+            f"Consensus: {target.observed_target:+.3f} · Mark: {_price_text(mark)}",
+            f"Coverage: {coverage} · Agreement: {agreement}",
+            (
+                "Clusters: "
+                f"{assessment.support_clusters} support / "
+                f"{assessment.oppose_clusters} oppose / "
+                f"{assessment.flat_clusters} flat"
+            ),
+            f"Uncertainty: [{target.lower_bound:+.3f}, {target.upper_bound:+.3f}]",
+            f"Why: {assessment.rationale}.",
+            "Edge status: prospective predictive edge is not yet qualified (ER4/ER5 pending).",
+            "R = your predefined maximum-loss research unit; no dollar notional is valid until a stop/invalidation model exists.",
+        ]
     )
 
 
@@ -423,7 +617,15 @@ class EnsembleRuntime:
                     or target.blocker_code != prior.blocker_code
                 )
             if changed:
-                delivered = _send_telegram(self.settings, _format_target(target))
+                symbol = target.coin.rsplit(":", 1)[-1]
+                delivered = _send_telegram(
+                    self.settings,
+                    _format_target(
+                        target,
+                        self.clusters,
+                        self.mids.get(symbol),
+                    ),
+                )
                 if self.settings.telegram_bot_token and self.settings.telegram_chat_id:
                     self.telegram_last_ok = delivered
                 LOG.info(
@@ -440,10 +642,19 @@ class EnsembleRuntime:
         ledger_id = ledger.get("ledger_id")
         consumed = self.store.get_offset(str(ledger_id)) if ledger_id else 0
         ledger_seq = int(ledger.get("current_seq", 0))
-        target_lines = [
-            f"{coin}: {target.observed_target:+.3f}"
-            for coin, target in sorted(targets.items())
-        ]
+        ranked = sorted(
+            targets.items(),
+            key=lambda item: abs(item[1].observed_target),
+            reverse=True,
+        )[:8]
+        target_lines = []
+        for coin, target in ranked:
+            assessment = _assess_target(target, self.clusters)
+            symbol = coin.rsplit(":", 1)[-1]
+            target_lines.append(
+                f"{symbol}: {assessment.direction} {target.observed_target:+.3f} · "
+                f"{assessment.follow_state} · {assessment.grade}"
+            )
         return "\n".join(
             [
                 "Advisory runtime: ONLINE",
@@ -451,9 +662,9 @@ class EnsembleRuntime:
                 f"Clusters: {len(self.clusters) if self.clusters is not None else 'equal-wallet'}",
                 f"Open positions: {len(self.store.list_positions())}",
                 f"Ledger: {consumed}/{ledger_seq} (lag {max(0, ledger_seq - consumed)})",
-                "Targets:",
+                f"Top targets ({len(targets)} total):",
                 *(target_lines or ["none"]),
-                "Execution: FINANCIAL_EFFECT_FORBIDDEN",
+                "Live sizing: NOT QUALIFIED · Execution: FINANCIAL_EFFECT_FORBIDDEN",
             ]
         )
 
