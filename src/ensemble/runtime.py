@@ -31,7 +31,6 @@ class RuntimeSettings:
     health_path: Path
     experts: list[str]
     poll_interval_s: float = 1.0
-    snapshot_refresh_s: float = 45.0
     market_refresh_s: float = 5.0
     target_change_threshold: Decimal = Decimal("0.05")
     telegram_bot_token: str | None = None
@@ -70,7 +69,6 @@ class RuntimeSettings:
             ),
             experts=experts,
             poll_interval_s=float(os.getenv("ENSEMBLE_POLL_INTERVAL_S", "1")),
-            snapshot_refresh_s=float(os.getenv("ENSEMBLE_SNAPSHOT_REFRESH_S", "45")),
             market_refresh_s=float(os.getenv("ENSEMBLE_MARKET_REFRESH_S", "5")),
             target_change_threshold=Decimal(
                 os.getenv("ENSEMBLE_TARGET_CHANGE_THRESHOLD", "0.05")
@@ -107,16 +105,6 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float = 15.0) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
-def fetch_clearinghouse_state(wallet: str) -> dict[str, Any]:
-    raw = _post_json(
-        "https://api.hyperliquid.xyz/info",
-        {"type": "clearinghouseState", "user": wallet},
-    )
-    if not isinstance(raw, dict):
-        raise TypeError(f"clearinghouseState for {wallet} returned non-object")
-    return raw
-
-
 def fetch_all_mids() -> dict[str, Decimal]:
     raw = _post_json("https://api.hyperliquid.xyz/info", {"type": "allMids"})
     if not isinstance(raw, dict):
@@ -129,41 +117,6 @@ def fetch_all_mids() -> dict[str, Decimal]:
             LOG.warning("ignoring invalid allMids value for %s", coin)
             continue
     return mids
-
-
-def snapshot_wallet(store: ProjectionStore, wallet: str) -> None:
-    raw = fetch_clearinghouse_state(wallet)
-    margin = raw.get("marginSummary")
-    if not isinstance(margin, dict) or margin.get("accountValue") is None:
-        raise RuntimeError(f"clearinghouseState for {wallet} missing accountValue")
-    equity = Decimal(str(margin["accountValue"]))
-    rows = raw.get("assetPositions")
-    if not isinstance(rows, list):
-        raise TypeError(f"clearinghouseState for {wallet} missing assetPositions")
-
-    positions: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        pos = row.get("position")
-        if not isinstance(pos, dict):
-            continue
-        coin = pos.get("coin")
-        szi = pos.get("szi")
-        if coin is None or szi is None:
-            continue
-        qty = Decimal(str(szi))
-        if qty == 0:
-            continue
-        positions.append(
-            {
-                "coin": str(coin),
-                "szi": str(qty),
-                "entry_px": str(pos.get("entryPx") or "0"),
-            }
-        )
-
-    store.replace_wallet_snapshot(wallet, positions, equity, datetime.now(UTC))
 
 
 def _ledger_status(path: Path) -> dict[str, Any]:
@@ -347,7 +300,6 @@ class EnsembleRuntime:
         self.store = ProjectionStore(settings.projection_db)
         self.mids: dict[str, Decimal] = {}
         self.prior_targets: dict[str, ConsensusTarget] = {}
-        self.last_snapshot_at = 0.0
         self.last_market_at = 0.0
         self.last_error: str | None = None
         self.telegram_last_ok: bool | None = None
@@ -355,35 +307,24 @@ class EnsembleRuntime:
     def close(self) -> None:
         self.store.close()
 
-    def refresh_snapshots(self) -> None:
-        failures: list[str] = []
-        for wallet in self.settings.experts:
-            try:
-                snapshot_wallet(self.store, wallet)
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                TypeError,
-                ValueError,
-                ArithmeticError,
-            ) as exc:
-                failures.append(f"{wallet}:{exc}")
-        if failures:
-            raise RuntimeError("; ".join(failures))
-
     def refresh_market(self) -> None:
         self.mids = fetch_all_mids()
 
     def compute_targets(self) -> dict[str, ConsensusTarget]:
         positions = self.store.list_positions()
-        coins = {p.coin for p in positions} | set(self.prior_targets)
+        instruments = {p.instrument_id for p in positions} | set(self.prior_targets)
         targets: dict[str, ConsensusTarget] = {}
         now = datetime.now(UTC)
 
-        for coin in sorted(coins):
+        for instrument_id in sorted(instruments):
             postures = []
+            sample = next(
+                (p for p in positions if p.instrument_id == instrument_id),
+                None,
+            )
+            coin = sample.coin if sample is not None else instrument_id.rsplit(":", 1)[-1]
             for wallet in self.settings.experts:
-                pos = self.store.get_position(wallet, coin)
+                pos = self.store.get_position(wallet, instrument_id)
                 equity_row = self.store.get_equity(wallet)
                 equity = equity_row[0] if equity_row else None
                 equity_age = (
@@ -399,14 +340,16 @@ class EnsembleRuntime:
                 postures.append(
                     compute_posture(
                         wallet,
-                        coin,
+                        instrument_id,
                         qty,
                         valuation,
                         equity,
                         equity_age_minutes=equity_age,
                     )
                 )
-            targets[coin] = compute_equal_budget_consensus(coin, postures, as_of=now)
+            targets[instrument_id] = compute_equal_budget_consensus(
+                instrument_id, postures, as_of=now
+            )
         return targets
 
     def maybe_notify(self, targets: dict[str, ConsensusTarget]) -> None:
@@ -507,9 +450,6 @@ class EnsembleRuntime:
 
     def step(self) -> None:
         now = time.monotonic()
-        if now - self.last_snapshot_at >= self.settings.snapshot_refresh_s:
-            self.refresh_snapshots()
-            self.last_snapshot_at = now
         if now - self.last_market_at >= self.settings.market_refresh_s:
             self.refresh_market()
             self.last_market_at = now
