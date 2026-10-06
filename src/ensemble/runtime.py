@@ -38,6 +38,7 @@ class RuntimeSettings:
     poll_interval_s: float = 1.0
     market_refresh_s: float = 5.0
     target_change_threshold: Decimal = Decimal("0.05")
+    notify_initial_targets: bool = True
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     telegram_chat_id_path: Path = Path("/home/quant/.local/share/copytrade/telegram-chat-id")
@@ -82,6 +83,10 @@ class RuntimeSettings:
             market_refresh_s=float(os.getenv("ENSEMBLE_MARKET_REFRESH_S", "5")),
             target_change_threshold=Decimal(
                 os.getenv("ENSEMBLE_TARGET_CHANGE_THRESHOLD", "0.05")
+            ),
+            notify_initial_targets=(
+                os.getenv("ENSEMBLE_NOTIFY_INITIAL_TARGETS", "true").strip().lower()
+                in {"1", "true", "yes", "on"}
             ),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
@@ -408,7 +413,7 @@ class EnsembleRuntime:
     def maybe_notify(self, targets: dict[str, ConsensusTarget]) -> None:
         for coin, target in targets.items():
             prior = self.prior_targets.get(coin)
-            changed = prior is None
+            changed = prior is None and self.settings.notify_initial_targets
             if prior is not None:
                 changed = (
                     abs(target.observed_target - prior.observed_target)
