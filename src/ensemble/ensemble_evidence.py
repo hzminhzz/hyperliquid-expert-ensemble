@@ -97,8 +97,16 @@ def _horizons(wallets: Sequence[WalletEvidence]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def _bound(value: Decimal) -> Decimal:
+    return max(Decimal(-1), min(Decimal(1), value))
+
+
 def _flow_map(wallet: WalletEvidence) -> dict[str, Decimal | None]:
-    return {value.horizon: value.delta_bias for value in wallet.intent_flow}
+    """Return bounded influence views; raw flow remains on WalletEvidence."""
+    return {
+        value.horizon: None if value.delta_bias is None else _bound(value.delta_bias)
+        for value in wallet.intent_flow
+    }
 
 
 def _baseline_equal_wallet(
