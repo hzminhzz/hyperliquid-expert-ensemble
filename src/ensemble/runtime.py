@@ -347,6 +347,7 @@ class EnsembleRuntime:
         self.settings = settings
         self.settings.projection_db.parent.mkdir(parents=True, exist_ok=True)
         self.settings.health_path.parent.mkdir(parents=True, exist_ok=True)
+        _load_paired_telegram_chat(self.settings)
         self.store = ProjectionStore(settings.projection_db)
         self.clusters = _load_cluster_manifest(
             settings.cluster_manifest_path, settings.experts
