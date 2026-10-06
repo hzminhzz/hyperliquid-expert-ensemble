@@ -97,7 +97,7 @@ def _horizons(wallets: Sequence[WalletEvidence]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
-def _flow_map(wallet: WalletEvidence) -> dict[str, Decimal]:
+def _flow_map(wallet: WalletEvidence) -> dict[str, Decimal | None]:
     return {value.horizon: value.delta_bias for value in wallet.intent_flow}
 
 
@@ -172,10 +172,11 @@ def _cluster_contribution(
 
         wallet_flow = _flow_map(wallet)
         for horizon in horizons:
-            if horizon not in wallet_flow:
+            value = wallet_flow.get(horizon)
+            if value is None:
                 flow_missing[horizon] += member_weight
             else:
-                flow_sums[horizon] += member_weight * wallet_flow[horizon]
+                flow_sums[horizon] += member_weight * value
 
     return ClusterContribution(
         cluster_id=cluster.cluster_id,
