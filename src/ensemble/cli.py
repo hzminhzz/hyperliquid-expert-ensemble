@@ -20,6 +20,14 @@ from .projection import ProjectionStore
 IMPLEMENTED_CAPABILITIES = {
     "version": "1.0.0",
     "environment": "mainnet",
+    "qualification": {
+        "engineering": "IMPLEMENTED",
+        "descriptive": "QUALIFIED_SYNTHETIC_REPLAY",
+        "historical_predictive": "BLOCKED_NO_PROSPECTIVE_ROWS",
+        "live_forward": "NOT_RUN",
+        "production_advisory": "NOT_RUN",
+        "financial_execution": "FORBIDDEN",
+    },
     "commands": [
         {
             "name": "run",
