@@ -1,0 +1,16 @@
+[Unit]
+Description=Copytrade Hyperliquid expert ensemble advisory runtime
+After=network-online.target copytrade-tracker.service
+Wants=network-online.target copytrade-tracker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/quant/dev/hyperliquid-expert-ensemble
+EnvironmentFile=/home/quant/dev/hyperliquid-expert-ensemble/.env
+ExecStart=/home/quant/dev/hyperliquid-expert-ensemble/.venv/bin/ensemble run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

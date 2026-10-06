@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,14 @@ IMPLEMENTED_CAPABILITIES = {
     "version": "1.0.0",
     "environment": "mainnet",
     "commands": [
+        {
+            "name": "run",
+            "family": "runtime",
+            "purpose": "Run the persistent shadow/advisory consumer and consensus loop",
+            "cost_class": "continuous_read_only",
+            "authority": "operator",
+            "status": "implemented",
+        },
         {
             "name": "inspect capabilities",
             "family": "inspect",
@@ -220,6 +229,7 @@ def cmd_evidence_lookup(evidence_id: str, manifests_dir: Path | None = None) -> 
 def main() -> None:
     parser = argparse.ArgumentParser(description="hyperliquid-expert-ensemble CLI")
     subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("run", help="Run persistent shadow/advisory runtime")
 
     # inspect
     inspect_parser = subparsers.add_parser("inspect", help="Inspection commands")
@@ -261,8 +271,32 @@ def main() -> None:
         if args.subcommand == "capabilities":
             print(json.dumps(cmd_inspect_capabilities(), indent=2))
         elif args.subcommand == "system":
-            store = ProjectionStore(":memory:")
-            print(json.dumps(cmd_inspect_system(store), indent=2))
+            health_path = Path(
+                os.getenv(
+                    "ENSEMBLE_HEALTH_PATH",
+                    "/home/quant/.local/share/copytrade/ensemble-health.json",
+                )
+            )
+            if health_path.exists():
+                print(health_path.read_text(encoding="utf-8"))
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "schema_version": "1.0",
+                            "mode": "advisory",
+                            "authority": {"financial_execution": False},
+                            "ingestion": {"status": "NOT_RUNNING"},
+                            "blockers": [
+                                {
+                                    "code": "RUNTIME_HEALTH_MISSING",
+                                    "reason": f"health file not found: {health_path}",
+                                }
+                            ],
+                        },
+                        indent=2,
+                    )
+                )
         elif args.subcommand == "changes":
             store = ProjectionStore(":memory:")
             print(json.dumps(cmd_inspect_changes(store, args.since), indent=2))
@@ -294,6 +328,10 @@ def main() -> None:
             print(json.dumps(explain_target(target), indent=2))
     elif args.command == "evidence" and args.subcommand == "lookup":
         print(json.dumps(cmd_evidence_lookup(args.id), indent=2))
+    elif args.command == "run":
+        from .runtime import run
+
+        run()
     else:
         parser.print_help()
 

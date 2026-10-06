@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS projected_positions (
     PRIMARY KEY (wallet_id, coin)
 );
 
+CREATE TABLE IF NOT EXISTS expert_equity (
+    wallet_id          TEXT    PRIMARY KEY,
+    account_value      TEXT    NOT NULL,
+    observed_at        TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS worldviews (
     view_id            TEXT    PRIMARY KEY,
     ledger_id          TEXT    NOT NULL,
@@ -139,11 +145,11 @@ class ProjectionStore:
 
                 if kind == "POSITION_CHANGE":
                     trans = payload.get("transition", "")
-                    if trans in ("OPEN", "ADD", "REDUCE"):
+                    if trans in ("OPEN", "ADD", "REDUCE", "FLIP", "SNAPSHOT"):
                         qty = Decimal(
                             str(payload.get("quantity_after") or payload.get("size") or "0")
                         )
-                        px = Decimal(str(payload.get("px") or payload.get("avg_entry") or "0"))
+                        px = Decimal(str(payload.get("avg_entry") or payload.get("px") or "0"))
                         direction = "Long" if qty > 0 else "Short"
 
                         self.conn.execute(
@@ -172,7 +178,7 @@ class ProjectionStore:
                                 now,
                             ),
                         )
-                    elif trans == "CLOSE":
+                    elif trans == "CLOSE" or Decimal(str(payload.get("quantity_after") or "0")) == 0:
                         self.conn.execute(
                             "DELETE FROM projected_positions WHERE wallet_id = ? AND coin = ?",
                             (wallet_id, coin),
@@ -194,6 +200,60 @@ class ProjectionStore:
             )
 
         return applied_count
+
+    def replace_wallet_snapshot(
+        self,
+        wallet_id: str,
+        positions: list[dict[str, Any]],
+        equity: Decimal,
+        observed_at: datetime,
+    ) -> None:
+        """Replace one wallet's projection from an authoritative current-state snapshot."""
+        ts = observed_at.isoformat()
+        with self.conn:
+            self.conn.execute("DELETE FROM projected_positions WHERE wallet_id = ?", (wallet_id,))
+            for pos in positions:
+                qty = Decimal(str(pos["szi"]))
+                if qty == 0:
+                    continue
+                self.conn.execute(
+                    """
+                    INSERT INTO projected_positions (
+                        wallet_id, coin, szi, direction, avg_entry, opened_at,
+                        last_added_at, realized_pnl, revision, generation, coverage, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, '0', 0, 1, 'SeededPartialHistory', ?)
+                    """,
+                    (
+                        wallet_id,
+                        str(pos["coin"]),
+                        str(qty),
+                        "Long" if qty > 0 else "Short",
+                        str(pos.get("entry_px") or "0"),
+                        ts,
+                        ts,
+                        ts,
+                    ),
+                )
+            self.conn.execute(
+                """
+                INSERT INTO expert_equity (wallet_id, account_value, observed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(wallet_id) DO UPDATE SET
+                    account_value = excluded.account_value,
+                    observed_at = excluded.observed_at
+                """,
+                (wallet_id, str(equity), ts),
+            )
+
+    def get_equity(self, wallet_id: str) -> tuple[Decimal, datetime] | None:
+        row = self.conn.execute(
+            "SELECT account_value, observed_at FROM expert_equity WHERE wallet_id = ?",
+            (wallet_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return Decimal(row["account_value"]), datetime.fromisoformat(row["observed_at"])
+
     def consume_from_ledger_db(
         self,
         ledger_db_path: Path | str,
