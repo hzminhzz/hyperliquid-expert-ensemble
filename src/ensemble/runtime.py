@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -23,6 +25,7 @@ from .consensus import (
 )
 from .posture import compute_posture
 from .projection import ProjectionStore
+from .research_recorder import CutInput, ResearchRecorder, minute_bucket
 
 LOG = logging.getLogger("ensemble.runtime")
 USER_AGENT = "OpenAI File Downloader, XaiImageApiFetch/1.0"
@@ -50,10 +53,18 @@ class RuntimeSettings:
     health_path: Path
     experts: list[str]
     cluster_manifest_path: Path | None = None
+    research_db: Path | None = None
+    research_assumed_cost_bps: Decimal = Decimal(10)
+    telegram_min_interval_s: float = 10.0
+    telegram_per_instrument_cooldown_s: float = 900.0
+    telegram_backoff_until: float = 0.0
     poll_interval_s: float = 1.0
     market_refresh_s: float = 5.0
     target_change_threshold: Decimal = Decimal("0.05")
     notify_initial_targets: bool = True
+    notify_warmup_s: float = 180.0
+    notify_max_per_minute: int = 4
+    notify_per_coin_cooldown_s: float = 600.0
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     telegram_chat_id_path: Path = Path("/home/quant/.local/share/copytrade/telegram-chat-id")
@@ -89,6 +100,20 @@ class RuntimeSettings:
                 )
             ),
             experts=experts,
+            research_db=(
+                Path(os.environ["ENSEMBLE_RESEARCH_DB"])
+                if os.getenv("ENSEMBLE_RESEARCH_DB")
+                else Path("/home/quant/.local/share/copytrade/prospective-research.db")
+            ),
+            research_assumed_cost_bps=Decimal(
+                os.getenv("ENSEMBLE_RESEARCH_COST_BPS", "10")
+            ),
+            telegram_min_interval_s=float(
+                os.getenv("ENSEMBLE_TELEGRAM_MIN_INTERVAL_S", "10")
+            ),
+            telegram_per_instrument_cooldown_s=float(
+                os.getenv("ENSEMBLE_TELEGRAM_COIN_COOLDOWN_S", "900")
+            ),
             cluster_manifest_path=(
                 Path(os.environ["ENSEMBLE_CLUSTER_MANIFEST"])
                 if os.getenv("ENSEMBLE_CLUSTER_MANIFEST")
@@ -102,6 +127,11 @@ class RuntimeSettings:
             notify_initial_targets=(
                 os.getenv("ENSEMBLE_NOTIFY_INITIAL_TARGETS", "true").strip().lower()
                 in {"1", "true", "yes", "on"}
+            ),
+            notify_warmup_s=float(os.getenv("ENSEMBLE_NOTIFY_WARMUP_S", "180")),
+            notify_max_per_minute=int(os.getenv("ENSEMBLE_NOTIFY_MAX_PER_MINUTE", "4")),
+            notify_per_coin_cooldown_s=float(
+                os.getenv("ENSEMBLE_NOTIFY_PER_COIN_COOLDOWN_S", "600")
             ),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN") or None,
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID") or None,
@@ -238,6 +268,8 @@ def _save_telegram_update_offset(settings: RuntimeSettings, offset: int) -> None
 def _send_telegram_to_chat(settings: RuntimeSettings, chat_id: str, text: str) -> bool:
     if not settings.telegram_bot_token:
         return False
+    if time.monotonic() < settings.telegram_backoff_until:
+        return False
     if len(text) > TELEGRAM_SAFE_MAX_CHARS:
         LOG.warning(
             "telegram message truncated from %d to %d characters",
@@ -257,8 +289,26 @@ def _send_telegram_to_chat(settings: RuntimeSettings, chat_id: str, text: str) -
         with urllib.request.urlopen(request, timeout=15.0) as response:
             data = json.loads(response.read().decode("utf-8"))
         return bool(data.get("ok"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            delay = 90.0
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+                retry = body.get("parameters", {}).get("retry_after")
+                if isinstance(retry, (int, float)) and retry > 0:
+                    delay = max(delay, float(retry))
+            except (ValueError, TypeError, OSError, AttributeError):
+                pass
+            settings.telegram_backoff_until = time.monotonic() + delay
+            LOG.warning("Telegram rate-limited; suspending outbound sends for %.0fs", delay)
+        else:
+            LOG.warning("Telegram HTTP delivery failed with status %s", exc.code)
+            settings.telegram_backoff_until = time.monotonic() + 30.0
+        exc.close()
+        return False
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         LOG.warning("telegram delivery failed: %s", exc)
+        settings.telegram_backoff_until = time.monotonic() + 30.0
         return False
 
 
@@ -536,6 +586,14 @@ def _format_target(
     )
 
 
+def _allmids_key(instrument_id: str) -> str | None:
+    """Only map the qualified default-perp namespace; HIP-3 stays unpriced."""
+    parts = instrument_id.split(":")
+    if len(parts) == 5 and parts[:4] == ["hyperliquid", "mainnet", "perp", "default"]:
+        return parts[4]
+    return None
+
+
 class EnsembleRuntime:
     def __init__(self, settings: RuntimeSettings) -> None:
         self.settings = settings
@@ -547,16 +605,43 @@ class EnsembleRuntime:
             settings.cluster_manifest_path, settings.experts
         )
         self.mids: dict[str, Decimal] = {}
+        self.market_known_at: datetime | None = None
         self.prior_targets: dict[str, ConsensusTarget] = {}
+        self.notice_baseline: dict[str, tuple[str, str, Decimal]] = {}
+        self.last_notified_at: dict[str, float] = {}
+        self.next_telegram_at = 0.0
+        self.notifications_bootstrapped = False
         self.last_market_at = 0.0
         self.last_error: str | None = None
         self.telegram_last_ok: bool | None = None
+        self.recorder = (
+            ResearchRecorder(
+                settings.research_db,
+                assumed_cost_bps=settings.research_assumed_cost_bps,
+            )
+            if settings.research_db is not None
+            else None
+        )
+        manifest_bytes = (
+            settings.cluster_manifest_path.read_bytes()
+            if settings.cluster_manifest_path is not None
+            else ",".join(settings.experts).encode("utf-8")
+        )
+        self.universe_revision = hashlib.sha256(manifest_bytes).hexdigest()
+        self.last_research_minute: datetime | None = None
+        self.research_stats: dict[str, object] | None = None
+        self.notify_started_at = time.monotonic()
+        self.notification_times: deque[float] = deque()
+        self.last_notification_by_coin: dict[str, float] = {}
 
     def close(self) -> None:
+        if self.recorder is not None:
+            self.recorder.close()
         self.store.close()
 
     def refresh_market(self) -> None:
         self.mids = fetch_all_mids()
+        self.market_known_at = datetime.now(UTC)
 
     def compute_targets(self) -> dict[str, ConsensusTarget]:
         positions = self.store.list_positions()
@@ -605,8 +690,76 @@ class EnsembleRuntime:
                 )
         return targets
 
+    def capture_research(self, targets: dict[str, ConsensusTarget]) -> None:
+        """Freeze one as-known descriptive cut per instrument and minute.
+
+        The immutable ledger cursor and HTTP-mid receipt time are recorded together.
+        This is observational V1 consensus, never a qualified ER4 forecast.
+        """
+        if self.recorder is None:
+            return
+        known_at = datetime.now(UTC)
+        minute = minute_bucket(known_at)
+        if self.last_research_minute == minute:
+            return
+
+        ledger = _ledger_status(self.settings.ledger_db)
+        ledger_id = ledger.get("ledger_id")
+        if not isinstance(ledger_id, str):
+            return
+        seq = self.store.get_offset(ledger_id)
+        cuts: list[CutInput] = []
+        for instrument_id, target in sorted(targets.items()):
+            assessment = _assess_target(target, self.clusters)
+            key = _allmids_key(instrument_id)
+            mid = self.mids.get(key) if key is not None else None
+            direction = (
+                1 if target.observed_target > 0
+                else -1 if target.observed_target < 0 else 0
+            )
+            cuts.append(
+                CutInput(
+                    instrument_id=instrument_id,
+                    consensus=target.observed_target,
+                    lower_bound=target.lower_bound,
+                    upper_bound=target.upper_bound,
+                    direction=direction,
+                    grade=assessment.grade,
+                    coverage=assessment.coverage,
+                    supporting_clusters=assessment.support_clusters,
+                    opposing_clusters=assessment.oppose_clusters,
+                    flat_clusters=assessment.flat_clusters,
+                    mid=mid,
+                    mid_known_at=self.market_known_at if mid is not None else None,
+                )
+            )
+        self.recorder.capture(
+            decision_at=known_at,
+            ledger_id=ledger_id,
+            ledger_seq=seq,
+            universe_revision=self.universe_revision,
+            cuts=cuts,
+        )
+        self.recorder.settle_due(now=known_at)
+        self.research_stats = self.recorder.stats()
+        self.last_research_minute = minute
+
     def maybe_notify(self, targets: dict[str, ConsensusTarget]) -> None:
-        for coin, target in targets.items():
+        """Throttle advisory delivery globally and by asset; never block ledger ingestion.
+
+        Startup revisions are deliberately suppressed and NOT replayed as a backlog.
+        Messages are informational, never execution instructions. The strongest
+        absolute targets get the limited delivery slots first.
+        """
+        now = time.monotonic()
+        if self.settings.notify_max_per_minute <= 0:
+            raise ValueError("ENSEMBLE_NOTIFY_MAX_PER_MINUTE must be positive")
+        while self.notification_times and now - self.notification_times[0] >= 60.0:
+            self.notification_times.popleft()
+        warming_up = now - self.notify_started_at < self.settings.notify_warmup_s
+        for coin, target in sorted(
+            targets.items(), key=lambda item: abs(item[1].observed_target), reverse=True
+        ):
             prior = self.prior_targets.get(coin)
             changed = prior is None and self.settings.notify_initial_targets
             if prior is not None:
@@ -616,25 +769,46 @@ class EnsembleRuntime:
                     or target.is_actionable != prior.is_actionable
                     or target.blocker_code != prior.blocker_code
                 )
-            if changed:
-                symbol = target.coin.rsplit(":", 1)[-1]
-                delivered = _send_telegram(
-                    self.settings,
-                    _format_target(
-                        target,
-                        self.clusters,
-                        self.mids.get(symbol),
-                    ),
-                )
-                if self.settings.telegram_bot_token and self.settings.telegram_chat_id:
-                    self.telegram_last_ok = delivered
-                LOG.info(
-                    "consensus %s target=%s actionable=%s delivered=%s",
-                    coin,
-                    target.observed_target,
-                    target.is_actionable,
-                    delivered,
-                )
+            if not changed or warming_up:
+                continue
+            assessment = _assess_target(target, self.clusters)
+            if not target.is_actionable or assessment.grade not in ("A", "B"):
+                continue
+            if (
+                self.notification_times
+                and now - self.notification_times[-1]
+                < self.settings.telegram_min_interval_s
+            ):
+                break
+            if (
+                len(self.notification_times) >= self.settings.notify_max_per_minute
+                or now - self.last_notification_by_coin.get(coin, -float("inf"))
+                < self.settings.notify_per_coin_cooldown_s
+            ):
+                LOG.info("advisory notification coalesced for %s by rate/cooldown", coin)
+                continue
+            symbol = target.coin.rsplit(":", 1)[-1]
+            delivered = _send_telegram(
+                self.settings,
+                _format_target(target, self.clusters, self.mids.get(symbol)),
+            )
+            if self.settings.telegram_bot_token and self.settings.telegram_chat_id:
+                self.telegram_last_ok = delivered
+            if delivered:
+                self.notification_times.append(now)
+                self.last_notification_by_coin[coin] = now
+            else:
+                # Back off even on transport/429 failures; do not flood retries.
+                self.notification_times.append(now)
+                self.last_notification_by_coin[coin] = now
+            LOG.info(
+                "consensus %s target=%s actionable=%s delivered=%s",
+                coin,
+                target.observed_target,
+                target.is_actionable,
+                delivered,
+            )
+        # Suppressed/coalesced observations are intentionally not replayed later.
         self.prior_targets = targets
 
     def telegram_status_text(self, targets: dict[str, ConsensusTarget]) -> str:
@@ -715,6 +889,11 @@ class EnsembleRuntime:
                 ),
                 "last_delivery_ok": self.telegram_last_ok,
             },
+            "research": (
+                self.research_stats
+                if self.research_stats is not None
+                else {"status": "NOT_YET_CAPTURED"}
+            ),
             "last_error": self.last_error,
         }
         tmp = self.settings.health_path.with_suffix(".tmp")
@@ -731,6 +910,7 @@ class EnsembleRuntime:
             pass
 
         targets = self.compute_targets()
+        self.capture_research(targets)
         self.maybe_notify(targets)
         _poll_telegram_commands(self.settings, self.telegram_status_text(targets))
         self.last_error = None
