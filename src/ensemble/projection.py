@@ -23,18 +23,19 @@ CREATE TABLE IF NOT EXISTS consumer_offsets (
 
 CREATE TABLE IF NOT EXISTS projected_positions (
     wallet_id          TEXT    NOT NULL,
+    instrument_id      TEXT    NOT NULL,
     coin               TEXT    NOT NULL,
     szi                TEXT    NOT NULL,
     direction          TEXT    NOT NULL,
     avg_entry          TEXT    NOT NULL,
-    opened_at          TEXT    NOT NULL,
-    last_added_at      TEXT    NOT NULL,
+    opened_at          TEXT,
+    last_added_at      TEXT,
     realized_pnl       TEXT    NOT NULL,
     revision           INTEGER NOT NULL,
     generation         INTEGER NOT NULL,
     coverage           TEXT    NOT NULL,
     updated_at         TEXT    NOT NULL,
-    PRIMARY KEY (wallet_id, coin)
+    PRIMARY KEY (wallet_id, instrument_id)
 );
 
 CREATE TABLE IF NOT EXISTS expert_equity (
@@ -59,12 +60,13 @@ CREATE TABLE IF NOT EXISTS worldviews (
 @dataclass(slots=True, frozen=True)
 class ProjectedPosition:
     wallet_id: str
+    instrument_id: str
     coin: str
     szi: Decimal
     direction: str
     avg_entry: Decimal
-    opened_at: datetime
-    last_added_at: datetime
+    opened_at: datetime | None
+    last_added_at: datetime | None
     realized_pnl: Decimal
     revision: int
     generation: int
@@ -98,6 +100,48 @@ class ProjectionStore:
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA busy_timeout = 5000")
         self.conn.execute("PRAGMA synchronous = NORMAL")
+
+        existing = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projected_positions'"
+        ).fetchone()
+        if existing:
+            columns = {
+                row["name"] for row in self.conn.execute("PRAGMA table_info(projected_positions)")
+            }
+            if "instrument_id" not in columns:
+                with self.conn:
+                    self.conn.executescript(
+                        """
+                        ALTER TABLE projected_positions RENAME TO projected_positions_legacy;
+                        CREATE TABLE projected_positions (
+                            wallet_id TEXT NOT NULL,
+                            instrument_id TEXT NOT NULL,
+                            coin TEXT NOT NULL,
+                            szi TEXT NOT NULL,
+                            direction TEXT NOT NULL,
+                            avg_entry TEXT NOT NULL,
+                            opened_at TEXT,
+                            last_added_at TEXT,
+                            realized_pnl TEXT NOT NULL,
+                            revision INTEGER NOT NULL,
+                            generation INTEGER NOT NULL,
+                            coverage TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            PRIMARY KEY (wallet_id, instrument_id)
+                        );
+                        INSERT INTO projected_positions (
+                            wallet_id, instrument_id, coin, szi, direction, avg_entry,
+                            opened_at, last_added_at, realized_pnl, revision, generation,
+                            coverage, updated_at
+                        )
+                        SELECT wallet_id,
+                               'hyperliquid:mainnet:perp:default:' || coin,
+                               coin, szi, direction, avg_entry, opened_at, last_added_at,
+                               realized_pnl, revision, generation, coverage, updated_at
+                        FROM projected_positions_legacy;
+                        DROP TABLE projected_positions_legacy;
+                        """
+                    )
         with self.conn:
             self.conn.executescript(SCHEMA)
 
@@ -137,51 +181,150 @@ class ProjectionStore:
 
                 kind = event.get("kind", "")
                 wallet_id = event.get("wallet_id", "")
-                instrument = event.get("instrument_id", "")
-                coin = instrument.split(":")[-1] if ":" in instrument else instrument
+                instrument = str(event.get("instrument_id", ""))
                 payload = event.get("payload", {})
+                if not isinstance(payload, dict):
+                    payload = {}
                 after_rev = int(event.get("after_revision", 0))
                 event_time = event.get("event_time", now)
 
-                if kind == "POSITION_CHANGE":
-                    trans = payload.get("transition", "")
-                    if trans in ("OPEN", "ADD", "REDUCE", "FLIP", "SNAPSHOT"):
-                        qty = Decimal(
-                            str(payload.get("quantity_after") or payload.get("size") or "0")
+                if kind == "ACCOUNT_SNAPSHOT":
+                    self.conn.execute(
+                        "DELETE FROM projected_positions WHERE wallet_id = ?", (wallet_id,)
+                    )
+                    rows = payload.get("positions") or []
+                    if not isinstance(rows, list):
+                        rows = []
+                    for pos in rows:
+                        if not isinstance(pos, dict):
+                            continue
+                        instrument_id = str(pos.get("instrument_id") or "")
+                        if not instrument_id:
+                            continue
+                        coin = str(
+                            pos.get("coin")
+                            or instrument_id.rsplit(":", 1)[-1]
                         )
-                        px = Decimal(str(payload.get("avg_entry") or payload.get("px") or "0"))
-                        direction = "Long" if qty > 0 else "Short"
-
+                        qty = Decimal(str(pos.get("quantity_after") or "0"))
+                        if qty == 0:
+                            continue
+                        coverage = str(
+                            pos.get("coverage")
+                            or payload.get("coverage")
+                            or "SeededPartialHistory"
+                        )
+                        opened_at = event_time if pos.get("opened_at_known") is True else None
                         self.conn.execute(
                             """
                             INSERT INTO projected_positions (
-                                wallet_id, coin, szi, direction, avg_entry, opened_at,
-                                last_added_at, realized_pnl, revision, generation, coverage, updated_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, '0', ?, 1, 'Seeded', ?)
-                            ON CONFLICT(wallet_id, coin) DO UPDATE SET
+                                wallet_id, instrument_id, coin, szi, direction, avg_entry,
+                                opened_at, last_added_at, realized_pnl, revision, generation,
+                                coverage, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, ?, ?)
+                            """,
+                            (
+                                wallet_id,
+                                instrument_id,
+                                coin,
+                                str(qty),
+                                "Long" if qty > 0 else "Short",
+                                str(pos.get("avg_entry") or "0"),
+                                opened_at,
+                                opened_at,
+                                int(pos.get("revision") or after_rev),
+                                int(pos.get("generation") or 0),
+                                coverage,
+                                now,
+                            ),
+                        )
+                    equity = payload.get("equity")
+                    if isinstance(equity, dict) and equity.get("account_value") is not None:
+                        observed_at = str(equity.get("observed_at") or event_time)
+                        self.conn.execute(
+                            """
+                            INSERT INTO expert_equity (wallet_id, account_value, observed_at)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(wallet_id) DO UPDATE SET
+                                account_value = excluded.account_value,
+                                observed_at = excluded.observed_at
+                            """,
+                            (wallet_id, str(equity["account_value"]), observed_at),
+                        )
+
+                elif kind == "POSITION_CHANGE":
+                    trans = str(payload.get("transition") or "")
+                    qty = Decimal(
+                        str(payload.get("quantity_after") or payload.get("size") or "0")
+                    )
+                    if trans == "CLOSE" or qty == 0:
+                        self.conn.execute(
+                            "DELETE FROM projected_positions WHERE wallet_id = ? AND instrument_id = ?",
+                            (wallet_id, instrument),
+                        )
+                    elif trans in ("OPEN", "ADD", "REDUCE", "FLIP", "SNAPSHOT"):
+                        existing = self.conn.execute(
+                            """
+                            SELECT opened_at, last_added_at, coverage, generation
+                            FROM projected_positions
+                            WHERE wallet_id = ? AND instrument_id = ?
+                            """,
+                            (wallet_id, instrument),
+                        ).fetchone()
+                        coin = str(
+                            payload.get("coin")
+                            or instrument.rsplit(":", 1)[-1]
+                        )
+                        px = Decimal(str(payload.get("avg_entry") or payload.get("px") or "0"))
+                        if trans in ("OPEN", "FLIP"):
+                            opened_at = event_time
+                            last_added_at = event_time
+                        else:
+                            opened_at = existing["opened_at"] if existing else None
+                            if trans == "ADD":
+                                last_added_at = event_time
+                            else:
+                                last_added_at = existing["last_added_at"] if existing else None
+                        coverage = str(
+                            payload.get("coverage")
+                            or (existing["coverage"] if existing else "PartialHistory")
+                        )
+                        generation = int(
+                            payload.get("generation")
+                            or (existing["generation"] if existing else 0)
+                        )
+                        self.conn.execute(
+                            """
+                            INSERT INTO projected_positions (
+                                wallet_id, instrument_id, coin, szi, direction, avg_entry,
+                                opened_at, last_added_at, realized_pnl, revision, generation,
+                                coverage, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, ?, ?)
+                            ON CONFLICT(wallet_id, instrument_id) DO UPDATE SET
+                                coin = excluded.coin,
                                 szi = excluded.szi,
                                 direction = excluded.direction,
                                 avg_entry = excluded.avg_entry,
+                                opened_at = excluded.opened_at,
                                 last_added_at = excluded.last_added_at,
                                 revision = excluded.revision,
+                                generation = excluded.generation,
+                                coverage = excluded.coverage,
                                 updated_at = excluded.updated_at
                             """,
                             (
                                 wallet_id,
+                                instrument,
                                 coin,
                                 str(qty),
-                                direction,
+                                "Long" if qty > 0 else "Short",
                                 str(px),
-                                event_time,
-                                event_time,
+                                opened_at,
+                                last_added_at,
                                 after_rev,
+                                generation,
+                                coverage,
                                 now,
                             ),
-                        )
-                    elif trans == "CLOSE" or Decimal(str(payload.get("quantity_after") or "0")) == 0:
-                        self.conn.execute(
-                            "DELETE FROM projected_positions WHERE wallet_id = ? AND coin = ?",
-                            (wallet_id, coin),
                         )
 
                 current_offset = max(current_offset, seq)
@@ -208,42 +351,9 @@ class ProjectionStore:
         equity: Decimal,
         observed_at: datetime,
     ) -> None:
-        """Replace one wallet's projection from an authoritative current-state snapshot."""
-        ts = observed_at.isoformat()
-        with self.conn:
-            self.conn.execute("DELETE FROM projected_positions WHERE wallet_id = ?", (wallet_id,))
-            for pos in positions:
-                qty = Decimal(str(pos["szi"]))
-                if qty == 0:
-                    continue
-                self.conn.execute(
-                    """
-                    INSERT INTO projected_positions (
-                        wallet_id, coin, szi, direction, avg_entry, opened_at,
-                        last_added_at, realized_pnl, revision, generation, coverage, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, '0', 0, 1, 'SeededPartialHistory', ?)
-                    """,
-                    (
-                        wallet_id,
-                        str(pos["coin"]),
-                        str(qty),
-                        "Long" if qty > 0 else "Short",
-                        str(pos.get("entry_px") or "0"),
-                        ts,
-                        ts,
-                        ts,
-                    ),
-                )
-            self.conn.execute(
-                """
-                INSERT INTO expert_equity (wallet_id, account_value, observed_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(wallet_id) DO UPDATE SET
-                    account_value = excluded.account_value,
-                    observed_at = excluded.observed_at
-                """,
-                (wallet_id, str(equity), ts),
-            )
+        raise RuntimeError(
+            "direct Python snapshot replacement is disabled; consume Rust ACCOUNT_SNAPSHOT events"
+        )
 
     def get_equity(self, wallet_id: str) -> tuple[Decimal, datetime] | None:
         row = self.conn.execute(
@@ -325,22 +435,39 @@ class ProjectionStore:
         finally:
             conn.close()
 
-    def get_position(self, wallet_id: str, coin: str) -> ProjectedPosition | None:
-        cur = self.conn.execute(
-            "SELECT * FROM projected_positions WHERE wallet_id = ? AND coin = ?",
-            (wallet_id, coin),
-        )
-        row = cur.fetchone()
-        if not row:
+    def get_position(self, wallet_id: str, instrument_or_coin: str) -> ProjectedPosition | None:
+        if ":" in instrument_or_coin:
+            rows = self.conn.execute(
+                "SELECT * FROM projected_positions WHERE wallet_id = ? AND instrument_id = ?",
+                (wallet_id, instrument_or_coin),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM projected_positions WHERE wallet_id = ? AND coin = ?",
+                (wallet_id, instrument_or_coin),
+            ).fetchall()
+            if len(rows) > 1:
+                raise ValueError(
+                    f"ambiguous coin {instrument_or_coin!r}; use full instrument_id"
+                )
+        if not rows:
             return None
+        row = rows[0]
         return ProjectedPosition(
             wallet_id=row["wallet_id"],
+            instrument_id=row["instrument_id"],
             coin=row["coin"],
             szi=Decimal(row["szi"]),
             direction=row["direction"],
             avg_entry=Decimal(row["avg_entry"]),
-            opened_at=datetime.fromisoformat(row["opened_at"]),
-            last_added_at=datetime.fromisoformat(row["last_added_at"]),
+            opened_at=(
+                datetime.fromisoformat(row["opened_at"]) if row["opened_at"] else None
+            ),
+            last_added_at=(
+                datetime.fromisoformat(row["last_added_at"])
+                if row["last_added_at"]
+                else None
+            ),
             realized_pnl=Decimal(row["realized_pnl"]),
             revision=int(row["revision"]),
             generation=int(row["generation"]),
@@ -349,16 +476,27 @@ class ProjectionStore:
         )
 
     def list_positions(self) -> list[ProjectedPosition]:
-        cur = self.conn.execute("SELECT * FROM projected_positions ORDER BY wallet_id, coin")
+        cur = self.conn.execute(
+            "SELECT * FROM projected_positions ORDER BY wallet_id, instrument_id"
+        )
         return [
             ProjectedPosition(
                 wallet_id=row["wallet_id"],
+                instrument_id=row["instrument_id"],
                 coin=row["coin"],
                 szi=Decimal(row["szi"]),
                 direction=row["direction"],
                 avg_entry=Decimal(row["avg_entry"]),
-                opened_at=datetime.fromisoformat(row["opened_at"]),
-                last_added_at=datetime.fromisoformat(row["last_added_at"]),
+                opened_at=(
+                    datetime.fromisoformat(row["opened_at"])
+                    if row["opened_at"]
+                    else None
+                ),
+                last_added_at=(
+                    datetime.fromisoformat(row["last_added_at"])
+                    if row["last_added_at"]
+                    else None
+                ),
                 realized_pnl=Decimal(row["realized_pnl"]),
                 revision=int(row["revision"]),
                 generation=int(row["generation"]),

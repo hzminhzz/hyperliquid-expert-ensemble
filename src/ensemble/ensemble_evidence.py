@@ -97,8 +97,16 @@ def _horizons(wallets: Sequence[WalletEvidence]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
-def _flow_map(wallet: WalletEvidence) -> dict[str, Decimal]:
-    return {value.horizon: value.delta_bias for value in wallet.intent_flow}
+def _bound(value: Decimal) -> Decimal:
+    return max(Decimal(-1), min(Decimal(1), value))
+
+
+def _flow_map(wallet: WalletEvidence) -> dict[str, Decimal | None]:
+    """Return bounded influence views; raw flow remains on WalletEvidence."""
+    return {
+        value.horizon: None if value.delta_bias is None else _bound(value.delta_bias)
+        for value in wallet.intent_flow
+    }
 
 
 def _baseline_equal_wallet(
@@ -172,10 +180,11 @@ def _cluster_contribution(
 
         wallet_flow = _flow_map(wallet)
         for horizon in horizons:
-            if horizon not in wallet_flow:
+            value = wallet_flow.get(horizon)
+            if value is None:
                 flow_missing[horizon] += member_weight
             else:
-                flow_sums[horizon] += member_weight * wallet_flow[horizon]
+                flow_sums[horizon] += member_weight * value
 
     return ClusterContribution(
         cluster_id=cluster.cluster_id,

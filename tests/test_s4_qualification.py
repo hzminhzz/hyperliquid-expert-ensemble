@@ -65,6 +65,17 @@ def test_q10_distinct_effects_of_eligibility_states():
     assert p_flat.state == EligibilityState.KNOWN_FLAT
     assert p_flat.clipped_posture == Decimal("0.0")
 
+    # Fresh authoritative flat state remains exactly zero even when account value is zero.
+    p_zero_equity_flat = compute_posture(
+        expert_id="0xflat-zero",
+        coin="BTC",
+        quantity=Decimal("0.0"),
+        valuation_price=Decimal(50000),
+        equity=Decimal("0.0"),
+    )
+    assert p_zero_equity_flat.state == EligibilityState.KNOWN_FLAT
+    assert p_zero_equity_flat.raw_exposure == Decimal("0.0")
+
     # 2. Abstaining: out of scope
     p_abstain = compute_posture(
         expert_id="0xabstain",
