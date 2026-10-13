@@ -1,0 +1,11 @@
+[Unit]
+Description=Twice daily descriptive Hyperliquid trade-flow digest
+
+[Timer]
+OnCalendar=*-*-* 09,21:00:00 Asia/Bangkok
+AccuracySec=1min
+Persistent=false
+Unit=copytrade-flow-digest.service
+
+[Install]
+WantedBy=timers.target

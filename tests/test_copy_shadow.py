@@ -6,6 +6,8 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from ensemble.copy_shadow import ShadowConsumer, ShadowSettings, evaluate
 
 T0=datetime(2026,10,13,0,tzinfo=UTC)
@@ -107,6 +109,16 @@ def test_priced_shadow_stores_hypothetical_and_censors_unsupported(tmp_path) -> 
     assert any(o["status"]=="VALID_HYPOTHETICAL" for o in outcomes)
     assert all(o["price_model"]=="MID_TO_MID_HYPOTHETICAL_NOT_EXECUTABLE"
                for o in outcomes)
+
+
+def test_journal_prospectivity_mode_is_pinned_and_cannot_be_retroactively_relabelled(tmp_path) -> None:
+    path=tmp_path/"ledger.db"
+    ledger(path)
+    live=ShadowSettings(path,tmp_path/"copy.db")
+    recorder=ShadowConsumer(live)
+    recorder.close()
+    with pytest.raises(RuntimeError,match="mode mismatch"):
+        ShadowConsumer(ShadowSettings(path,tmp_path/"copy.db",retrospective=True))
 
 
 def test_copy_report_never_claims_executable_pnl(tmp_path) -> None:

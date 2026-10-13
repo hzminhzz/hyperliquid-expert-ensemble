@@ -60,8 +60,27 @@ class ShadowConsumer:
         if meta is None:
             raise ValueError("source ledger missing")
         self.ledger_id=str(meta["ledger_id"])
-        if self.journal.cursor(self.ledger_id)==0 and not settings.retrospective:
-            with self.journal.db:
+        mode=("RETROSPECTIVE_AS_KNOWN_NOT_PROSPECTIVE"
+              if settings.retrospective else "PROSPECTIVE_SHADOW_ONLY")
+        with self.journal.db:
+            self.journal.db.execute(
+                "CREATE TABLE IF NOT EXISTS journal_modes("
+                "ledger_id TEXT PRIMARY KEY,mode TEXT NOT NULL)"
+            )
+        existing=self.journal.db.execute(
+            "SELECT mode FROM journal_modes WHERE ledger_id=?",(self.ledger_id,)
+        ).fetchone()
+        if existing is not None and str(existing[0])!=mode:
+            self.close()
+            raise RuntimeError(
+                "opportunity journal mode mismatch: cannot relabel historical data"
+            )
+        with self.journal.db:
+            if existing is None:
+                self.journal.db.execute(
+                    "INSERT INTO journal_modes VALUES (?,?)",(self.ledger_id,mode)
+                )
+            if self.journal.cursor(self.ledger_id)==0 and not settings.retrospective:
                 self.journal.seal_cursor(self.ledger_id,int(meta["current_seq"]))
 
     def close(self) -> None:
@@ -244,7 +263,7 @@ def evaluate(
 
 def main(argv: list[str] | None = None) -> None:
     p=argparse.ArgumentParser(description="Copytrade shadow opportunity pipeline")
-    p.add_argument("command",choices=("scan","evaluate","inspect","health","study","explain","export","verify"))
+    p.add_argument("command",choices=("scan","evaluate","inspect","health","study","explain","board","wallet","changes","export","verify"))
     p.add_argument("--ledger",type=Path,default=Path("/home/quant/.local/share/copytrade/observation.db"))
     p.add_argument("--journal",type=Path,default=Path("/home/quant/.local/share/copytrade/copy-opportunities-live.db"))
     p.add_argument("--prices",type=Path,default=Path("/home/quant/.local/share/copytrade/prospective-research.db"))
@@ -258,6 +277,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--format",choices=("ndjson.gz","parquet"),default="ndjson.gz")
     p.add_argument("--first-seq",type=int,default=0)
     p.add_argument("--horizon",type=str,default="1h")
+    p.add_argument("--hours",type=int,default=4)
+    p.add_argument("--wallet",type=str,default=None)
+    p.add_argument("--since-seq",type=int,default=0)
     p.add_argument("--control-revision",type=str,default=None)
     p.add_argument("--since",type=str,default=None,
                    help="Earliest opportunity knowledge timestamp for bounded evaluation")
@@ -289,13 +311,33 @@ def main(argv: list[str] | None = None) -> None:
             ),
         )
     elif args.command=="explain":
+        from .copy_agent import explain_copy_decision
+
         if not args.id:
             raise ValueError("explain requires --id")
-        journal=OpportunityJournal(settings.journal_db)
-        try:
-            output=journal.get(args.id) or {"status":"NOT_FOUND","id":args.id}
-        finally:
-            journal.close()
+        output=explain_copy_decision(
+            journal_db=args.journal,outcome_db=args.outcomes,
+            opportunity_id=args.id,
+        )
+    elif args.command=="board":
+        from .copy_board import build_trade_flow_board
+
+        output=build_trade_flow_board(
+            journal_db=args.journal,now=datetime.now(UTC),hours=args.hours,
+            max_coins=min(args.limit,20),
+        )
+    elif args.command=="wallet":
+        from .copy_agent import inspect_wallet
+
+        if not args.wallet:
+            raise ValueError("wallet requires --wallet")
+        output=inspect_wallet(journal_db=args.journal,wallet_id=args.wallet,limit=args.limit)
+    elif args.command=="changes":
+        from .copy_agent import inspect_changes
+
+        output=inspect_changes(
+            journal_db=args.journal,since_seq=args.since_seq,limit=args.limit,
+        )
     elif args.command=="export":
         from .copy_export import export_opportunity_partition
 
