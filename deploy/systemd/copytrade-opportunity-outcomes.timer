@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic copy-opportunity horizon evaluation
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=10min
+AccuracySec=10s
+Persistent=false
+Unit=copytrade-opportunity-outcomes.service
+
+[Install]
+WantedBy=timers.target

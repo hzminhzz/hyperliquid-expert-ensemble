@@ -20,6 +20,14 @@ from .projection import ProjectionStore
 IMPLEMENTED_CAPABILITIES = {
     "version": "1.0.0",
     "environment": "mainnet",
+    "qualification": {
+        "engineering": "IMPLEMENTED",
+        "descriptive": "QUALIFIED_SYNTHETIC_REPLAY",
+        "historical_predictive": "BLOCKED_NO_PROSPECTIVE_ROWS",
+        "live_forward": "NOT_RUN",
+        "production_advisory": "NOT_RUN",
+        "financial_execution": "FORBIDDEN",
+    },
     "commands": [
         {
             "name": "run",
@@ -92,6 +100,14 @@ IMPLEMENTED_CAPABILITIES = {
             "cost_class": "free",
             "authority": "runtime_operator",
             "status": "implemented",
+        },
+        {
+            "name": "copy scan/evaluate/inspect",
+            "family": "copy_research",
+            "purpose": "Bounded shadow-only causal opportunity journal and hypothetical outcome inspection",
+            "cost_class": "bounded_local_research",
+            "authority": "operator",
+            "status": "implemented_shadow_only",
         },
         {
             "name": "evaluate",
@@ -230,6 +246,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="hyperliquid-expert-ensemble CLI")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("run", help="Run persistent shadow/advisory runtime")
+    copy_parser = subparsers.add_parser("copy", help="Bounded shadow opportunity research")
+    copy_parser.add_argument("copy_args", nargs=argparse.REMAINDER)
 
     # inspect
     inspect_parser = subparsers.add_parser("inspect", help="Inspection commands")
@@ -267,7 +285,11 @@ def main() -> None:
     apply_parser.add_argument("--key", required=True, help="Idempotency key")
     args = parser.parse_args()
 
-    if args.command == "inspect":
+    if args.command == "copy":
+        from .copy_shadow import main as copy_main
+
+        copy_main(args.copy_args)
+    elif args.command == "inspect":
         if args.subcommand == "capabilities":
             print(json.dumps(cmd_inspect_capabilities(), indent=2))
         elif args.subcommand == "system":

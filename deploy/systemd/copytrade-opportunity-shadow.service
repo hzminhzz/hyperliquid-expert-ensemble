@@ -1,0 +1,18 @@
+[Unit]
+Description=Copytrade causal copy opportunities (shadow-only, no financial effects)
+After=copytrade-tracker.service
+Wants=copytrade-tracker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/quant/dev/hyperliquid-expert-ensemble
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/quant/dev/hyperliquid-expert-ensemble/.venv/bin/python -m ensemble.copy_shadow scan --journal /home/quant/.local/share/copytrade/copy-opportunities-live.db --batch 500 --batches 5
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+MemoryHigh=128M
+MemoryMax=256M
+CPUQuota=20%
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=45
