@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("command",choices=("scan","evaluate","inspect","health","study","explain","board","wallet","changes","export","verify"))
     p.add_argument("--ledger",type=Path,default=Path("/home/quant/.local/share/copytrade/observation.db"))
     p.add_argument("--journal",type=Path,default=Path("/home/quant/.local/share/copytrade/copy-opportunities-live.db"))
-    p.add_argument("--prices",type=Path,default=Path("/home/quant/.local/share/copytrade/prospective-research.db"))
+    p.add_argument("--prices",type=Path,default=Path("/home/quant/.local/share/copytrade/market-reference.db"))
     p.add_argument("--outcomes",type=Path,default=Path("/home/quant/.local/share/copytrade/copy-outcomes-live.db"))
     p.add_argument("--batch",type=int,default=500)
     p.add_argument("--batches",type=int,default=10)

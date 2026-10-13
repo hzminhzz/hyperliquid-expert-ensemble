@@ -17,6 +17,7 @@ def test_runtime_capture_records_exact_processed_ledger_cut(monkeypatch, tmp_pat
         projection_db=tmp_path / "projection.db",
         health_path=tmp_path / "health.json",
         research_db=tmp_path / "research.db",
+        research_mode="legacy",
         telegram_chat_id_path=tmp_path / "none",
         experts=["0x" + "11" * 20],
     )
@@ -71,6 +72,7 @@ def test_hip3_without_qualified_quote_mapping_never_uses_entry_price(monkeypatch
         projection_db=tmp_path / "projection.db",
         health_path=tmp_path / "health.json",
         research_db=tmp_path / "research.db",
+        research_mode="legacy",
         telegram_chat_id_path=tmp_path / "none",
         experts=["0x" + "11" * 20],
     )

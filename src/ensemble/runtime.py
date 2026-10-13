@@ -24,6 +24,7 @@ from .consensus import (
     compute_hierarchical_cluster_consensus,
 )
 from .posture import compute_posture
+from .price_checkpoints import PriceCheckpointStore
 from .projection import ProjectionStore
 from .research_recorder import CutInput, ResearchRecorder, minute_bucket
 
@@ -54,6 +55,8 @@ class RuntimeSettings:
     experts: list[str]
     cluster_manifest_path: Path | None = None
     research_db: Path | None = None
+    research_mode: str = "price_only"
+    price_checkpoint_db: Path = Path("/home/quant/.local/share/copytrade/market-reference.db")
     research_assumed_cost_bps: Decimal = Decimal(10)
     telegram_min_interval_s: float = 10.0
     telegram_per_instrument_cooldown_s: float = 900.0
@@ -105,6 +108,11 @@ class RuntimeSettings:
                 if os.getenv("ENSEMBLE_RESEARCH_DB")
                 else Path("/home/quant/.local/share/copytrade/prospective-research.db")
             ),
+            research_mode=os.getenv("ENSEMBLE_RESEARCH_MODE", "price_only"),
+            price_checkpoint_db=Path(os.getenv(
+                "ENSEMBLE_PRICE_CHECKPOINT_DB",
+                "/home/quant/.local/share/copytrade/market-reference.db",
+            )),
             research_assumed_cost_bps=Decimal(
                 os.getenv("ENSEMBLE_RESEARCH_COST_BPS", "10")
             ),
@@ -614,13 +622,19 @@ class EnsembleRuntime:
         self.last_market_at = 0.0
         self.last_error: str | None = None
         self.telegram_last_ok: bool | None = None
+        if settings.research_mode not in {"price_only", "legacy", "off"}:
+            raise ValueError("ENSEMBLE_RESEARCH_MODE must be price_only, legacy, or off")
         self.recorder = (
             ResearchRecorder(
                 settings.research_db,
                 assumed_cost_bps=settings.research_assumed_cost_bps,
             )
-            if settings.research_db is not None
+            if settings.research_mode == "legacy" and settings.research_db is not None
             else None
+        )
+        self.price_recorder = (
+            PriceCheckpointStore(settings.price_checkpoint_db)
+            if settings.research_mode == "price_only" else None
         )
         manifest_bytes = (
             settings.cluster_manifest_path.read_bytes()
@@ -637,6 +651,8 @@ class EnsembleRuntime:
     def close(self) -> None:
         if self.recorder is not None:
             self.recorder.close()
+        if self.price_recorder is not None:
+            self.price_recorder.close()
         self.store.close()
 
     def refresh_market(self) -> None:
@@ -696,11 +712,28 @@ class EnsembleRuntime:
         The immutable ledger cursor and HTTP-mid receipt time are recorded together.
         This is observational V1 consensus, never a qualified ER4 forecast.
         """
-        if self.recorder is None:
+        if self.recorder is None and self.price_recorder is None:
+            self.research_stats = {
+                "status": "RESEARCH_OFF_NOT_QUALIFIED",
+                "legacy_consensus_cuts_enabled": False,
+                "legacy_forward_outcomes_enabled": False,
+            }
             return
         known_at = datetime.now(UTC)
         minute = minute_bucket(known_at)
         if self.last_research_minute == minute:
+            return
+        if self.price_recorder is not None:
+            inputs: dict[str, tuple[Decimal, datetime | None]] = {}
+            for instrument_id in targets:
+                key = _allmids_key(instrument_id)
+                if key is not None and key in self.mids:
+                    inputs[instrument_id] = (self.mids[key], self.market_known_at)
+            self.price_recorder.capture(known_at=known_at, prices=inputs)
+            self.research_stats = self.price_recorder.stats()
+            self.last_research_minute = minute
+            return
+        if self.recorder is None:
             return
 
         ledger = _ledger_status(self.settings.ledger_db)

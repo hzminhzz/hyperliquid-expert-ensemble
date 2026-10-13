@@ -72,28 +72,42 @@ def inspect_integrity(
                 }
     if research_db is not None and research_db.exists():
         with closing(sqlite3.connect(f"file:{research_db}?mode=ro",uri=True,timeout=5)) as db:
-            cut_count=db.execute("SELECT count(*) FROM signal_cuts").fetchone()[0]
-            # Minute coverage only; a detected gap is not automatically loss
-            # of every Rust observation or trade receipt.
-            gaps=db.execute(
-                "SELECT prev,minute_utc, "
-                "(unixepoch(minute_utc)-unixepoch(prev))/60 AS missing_minutes "
-                "FROM (SELECT minute_utc,lag(minute_utc) OVER "
-                "(ORDER BY minute_utc) prev "
-                "FROM (SELECT DISTINCT minute_utc FROM signal_cuts)) "
-                "WHERE (unixepoch(minute_utc)-unixepoch(prev))>120 "
-                "ORDER BY missing_minutes DESC LIMIT 5"
-            ).fetchall()
-            output["scoring"]={
-                "status":"HISTORICAL_GAPS" if gaps else "MINUTE_TIMELINE_NO_GAP_OBSERVED",
-                "cut_rows":int(cut_count),
-                "gap_boundaries":[
-                    {"start":str(p),"end":str(q),"interval_minutes":int(m)}
-                    for p,q,m in gaps
-                ],
-            }
-            if gaps:
-                output["blockers"].append("SCORING_GAP_NOT_RETROACTIVELY_RECOVERABLE")
+            has_cuts=db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_cuts'"
+            ).fetchone() is not None
+            if not has_cuts:
+                count,latest=db.execute(
+                    "SELECT count(*),max(known_at) FROM reference_mids"
+                ).fetchone()
+                output["scoring"]={
+                    "status":"EVENT_DRIVEN_PRICE_CHECKPOINTS_NO_LEGACY_CUTS",
+                    "reference_price_rows":int(count),"latest_price_known_at":latest,
+                    "legacy_per_minute_scoring_enabled":False,
+                }
+            else:
+                cut_count=db.execute("SELECT count(*) FROM signal_cuts").fetchone()[0]
+                # Historical gaps remain part of archived source evidence.
+                gaps=db.execute(
+                    "SELECT prev,minute_utc, "
+                    "(unixepoch(minute_utc)-unixepoch(prev))/60 AS missing_minutes "
+                    "FROM (SELECT minute_utc,lag(minute_utc) OVER "
+                    "(ORDER BY minute_utc) prev "
+                    "FROM (SELECT DISTINCT minute_utc FROM signal_cuts)) "
+                    "WHERE (unixepoch(minute_utc)-unixepoch(prev))>120 "
+                    "ORDER BY missing_minutes DESC LIMIT 5"
+                ).fetchall()
+                output["scoring"]={
+                    "status":"HISTORICAL_GAPS" if gaps else "MINUTE_TIMELINE_NO_GAP_OBSERVED",
+                    "cut_rows":int(cut_count),
+                    "gap_boundaries":[
+                        {"start":str(p),"end":str(q),"interval_minutes":int(m)}
+                        for p,q,m in gaps
+                    ],
+                }
+                if gaps:
+                    output["blockers"].append(
+                        "SCORING_GAP_NOT_RETROACTIVELY_RECOVERABLE"
+                    )
     if opportunity_db is not None and opportunity_db.exists():
         with closing(sqlite3.connect(
             f"file:{opportunity_db}?mode=ro",uri=True,timeout=5
@@ -137,7 +151,7 @@ def inspect_integrity(
         output["research"]={"qualification":qualification}
         if age is None or age>120:
             output["blockers"].append("RUNTIME_HEALTH_STALE")
-        if "QUALIFIED" not in qualification or qualification.startswith("DESCRIPTIVE"):
+        if qualification != "APPROVED_ADVISORY_QUALIFIED":
             output["blockers"].append("PREDICTIVE_ALPHA_NOT_QUALIFIED")
     swap_free=output["memory"]["swap_free_mib"]
     if swap_free is not None and swap_free <= 64:
