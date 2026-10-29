@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import urllib.error
 import urllib.request
@@ -109,6 +110,15 @@ def publish_digest(
         # The short period ID helps humans spot a possible retry duplicate if
         # a process crashes after Telegram acceptance but before local commit.
         message=render_flow_digest(board)+f"\nDigest: <code>{key}</code>"
+        try:
+            disk=shutil.disk_usage("/")
+            if disk.used/disk.total>=0.85:
+                message+=(
+                    f"\nOPS WARNING: VPS disk {disk.used * 100 // disk.total}% used."
+                    " Keep observation archives intact; review storage capacity."
+                )
+        except OSError:
+            pass
         sender=send or (lambda t,c,m:_telegram_send(token=t,chat_id=c,message=m))
         try:
             success=sender(token,chat_id,message)

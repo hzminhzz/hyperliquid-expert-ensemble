@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from ensemble.copy_digest import publish_digest
 
@@ -50,6 +51,24 @@ def test_digest_idempotence_and_no_trading_recommendation(tmp_path:Path)->None:
     assert len(calls)==1
     assert "NOT a copy/entry signal" in calls[0]
     assert "Entry price/size: NOT AVAILABLE" in calls[0]
+
+
+def test_disk_pressure_warns_without_presenting_trading_advice(tmp_path:Path,monkeypatch)->None:
+    source,journal,delivery=fixtures(tmp_path)
+    monkeypatch.setattr(
+        "ensemble.copy_digest.shutil.disk_usage",
+        lambda _: SimpleNamespace(total=100,used=90,free=10),
+    )
+    sent=[]
+    result=publish_digest(
+        journal_db=journal,state_db=delivery,source_db=source,now=AT,
+        token="dummy",chat_id="somechat",
+        send=lambda _token,_chat,message: sent.append(message) or True,
+    )
+    assert result["status"]=="DELIVERED_DESCRIPTIVE_ONLY"
+    assert len(sent)==1
+    assert "OPS WARNING: VPS disk 90% used" in sent[0]
+    assert "NOT a copy/entry signal" in sent[0]
 
 
 def test_failed_delivery_is_retriable_and_observation_staleness_blocks(tmp_path:Path)->None:
