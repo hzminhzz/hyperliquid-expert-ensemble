@@ -52,7 +52,8 @@ def test_only_material_a_b_recommendations_may_notify(monkeypatch, tmp_path):
         assert sent == []
         runtime.maybe_notify({COIN: target("0.4")})
         assert len(sent) == 1
-        assert "Grade A" in sent[0]
+        assert "DESCRIPTIVE ONLY" in sent[0]
+        assert "0.50R" not in sent[0] and "Grade A" not in sent[0]
         runtime.maybe_notify({COIN: target("0.4")})
         assert len(sent) == 1
         # Same market cannot re-alert immediately even on a material increase.

@@ -16,8 +16,9 @@ def test_price_only_health_keeps_alpha_blocked_and_distinguishes_archives(tmp_pa
     health=tmp_path/"health.json"
     now=datetime.now(UTC)
     with closing(sqlite3.connect(ledger)) as db,db:
-        db.execute("CREATE TABLE ledger_meta(ledger_id TEXT,current_seq INTEGER)")
-        db.execute("INSERT INTO ledger_meta VALUES ('l',100)")
+        db.execute("CREATE TABLE ledger_meta(ledger_id TEXT,current_seq INTEGER,retention_floor INTEGER DEFAULT 0)")
+        db.execute("CREATE TABLE outbox_events(seq INTEGER PRIMARY KEY)")
+        db.execute("INSERT INTO ledger_meta(ledger_id,current_seq) VALUES ('l',100)")
     store=PriceCheckpointStore(mids)
     store.close()
     health.write_text(json.dumps({

@@ -30,11 +30,11 @@ def ledger(path) -> None:
         events=[
             (1,"ACCOUNT_SNAPSHOT",{},T0),
             (2,"POSITION_CHANGE",{"transition":"OPEN","delta":"1",
-                    "quantity_after":"1","px":"100"},T0+timedelta(seconds=3)),
+                    "quantity_after":"1","px":"100","coverage":"Seeded"},T0+timedelta(seconds=3)),
             (3,"POSITION_CHANGE",{"transition":"ADD","delta":"0.25",
-                    "quantity_after":"1.25","px":"101"},T0+timedelta(seconds=5)),
+                    "quantity_after":"1.25","px":"101","coverage":"Seeded"},T0+timedelta(seconds=5)),
             (4,"POSITION_CHANGE",{"transition":"REDUCE","delta":"-1",
-                    "quantity_after":"0.25","px":"102"},T0+timedelta(seconds=7)),
+                    "quantity_after":"0.25","px":"102","coverage":"Seeded"},T0+timedelta(seconds=7)),
         ]
         for seq,kind,payload,t in events:
             db.execute("INSERT INTO outbox_events VALUES (?,?,?,?,?,?,?,?,?)",(
@@ -103,7 +103,7 @@ def test_priced_shadow_stores_hypothetical_and_censors_unsupported(tmp_path) -> 
                         at.isoformat(),str(100+n)))
     result=evaluate(cfg,now=T0+timedelta(hours=3),max_opportunities=3)
     assert result["valid_hypothetical"]>=1
-    assert result["no_copy"]>=1
+    assert result["no_copy"]==0  # Non-entry opportunities remain in journal, not 5 label rows.
     with closing(sqlite3.connect(cfg.outcome_db)) as db:
         outcomes=[json.loads(r[0]) for r in db.execute(
             "SELECT value_json FROM copy_markouts"
@@ -164,6 +164,56 @@ def test_mature_short_horizons_do_not_starve_behind_pending_24h(tmp_path) -> Non
     assert ("15m","VALID_HYPOTHETICAL") in recent_rows
     assert ("5m","VALID_HYPOTHETICAL") in oldest_rows
     assert all(horizon!="24h" for horizon,_ in recent_rows)
+
+
+
+def test_bounded_evaluator_drains_old_work_while_servicing_new_work(tmp_path) -> None:
+    cfg=ShadowSettings(
+        tmp_path/"unused.db",tmp_path/"opportunities.db",
+        tmp_path/"prices.db",tmp_path/"outcomes.db",
+    )
+    journal=OpportunityJournal(cfg.journal_db)
+    decisions=[]
+    try:
+        for seq in range(1,65):
+            known=T0+timedelta(hours=2 if seq>60 else 0,seconds=seq)
+            decision=journal.observe(TradeTransition(
+                source_id=f"load-{seq}",wallet_id=f"wallet-{seq}",
+                instrument_id=BTC,source_kind="OPEN",
+                quantity_before=Decimal(0),quantity_after=Decimal(1),
+                price=Decimal(100),event_at=known,known_at=known,
+                ledger_id="load-ledger",ledger_seq=seq,
+            ),observation_at=known)
+            assert decision is not None
+            decisions.append(decision)
+    finally:
+        journal.close()
+    with closing(sqlite3.connect(cfg.price_db)) as db,db:
+        db.execute("""
+            CREATE TABLE reference_mids(instrument_id TEXT,minute_utc TEXT,
+            known_at TEXT,mid TEXT,PRIMARY KEY(instrument_id,minute_utc))""")
+        for m in range(200):
+            at=T0+timedelta(minutes=m,seconds=15)
+            db.execute("INSERT INTO reference_mids VALUES (?,?,?,?)",(
+                BTC,at.replace(second=0).isoformat(),
+                at.isoformat(),str(100+m/1000),
+            ))
+    now=T0+timedelta(hours=3,minutes=10)
+    first=evaluate(cfg,now=now,max_opportunities=6)
+    assert first["inspected"]==6
+    with closing(sqlite3.connect(cfg.outcome_db)) as db:
+        assert db.execute(
+            "SELECT count(*) FROM copy_markouts WHERE horizon='5m'"
+        ).fetchone()[0]>=2
+    for _ in range(20):
+        evaluate(cfg,now=now,max_opportunities=6)
+    with closing(sqlite3.connect(cfg.outcome_db)) as db:
+        assert db.execute(
+            "SELECT count(*) FROM copy_markouts WHERE horizon='5m'"
+        ).fetchone()[0]==len(decisions)
+        assert db.execute(
+            "SELECT count(*) FROM copy_markouts WHERE horizon='24h'"
+        ).fetchone()[0]==0
 
 
 def test_journal_prospectivity_mode_is_pinned_and_cannot_be_retroactively_relabelled(tmp_path) -> None:

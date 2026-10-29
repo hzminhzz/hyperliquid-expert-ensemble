@@ -50,10 +50,10 @@ def test_strong_cluster_consensus_formats_as_compact_shadow_follow():
     assert assessment.grade == "B"
     assert assessment.follow_state == "PAPER-FOLLOW"
     assert assessment.shadow_risk_cap == Decimal("0.25")
-    assert "Shadow risk cap: 0.25R" in message
-    assert "Live size: NOT QUALIFIED" in message
-    assert "prospective predictive edge is not yet qualified" in message
-    assert "A=" not in message
+    assert "DESCRIPTIVE ONLY" in message
+    assert "predictive edge and executable entry/size: NOT QUALIFIED".lower() in message.lower()
+    assert "0.25R" not in message and "PAPER-FOLLOW" not in message
+    assert "Grade B" not in message and "risk cap" not in message
     assert len(message) < TELEGRAM_SAFE_MAX_CHARS
 
 
@@ -74,8 +74,9 @@ def test_missing_cluster_mass_blocks_follow_and_size():
     assert assessment.grade == "BLOCKED"
     assert assessment.follow_state == "NO-FOLLOW"
     assert assessment.shadow_risk_cap == 0
-    assert "0R" in message
-    assert "too much cluster weight is unavailable" in message
+    assert "0R" not in message
+    assert "INSUFFICIENT_COVERAGE" in message
+    assert "NOT QUALIFIED" in message
 
 
 def test_fresh_zero_equity_flat_does_not_create_missing_mass():

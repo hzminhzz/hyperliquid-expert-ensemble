@@ -175,16 +175,29 @@ class ProjectionStore:
                 cursor = event.get("cursor", {})
                 seq = int(cursor.get("seq", 0))
 
-                # Idempotency guard: skip already applied events
+                # A missing source event must never be accepted as a flat position.
+                if str(cursor.get("ledger_id")) != ledger_id:
+                    raise ValueError("source ledger identity changed")
                 if seq <= current_offset:
                     continue
+                if seq != current_offset + 1:
+                    raise ValueError("source ledger sequence gap; projection unchanged")
 
                 kind = event.get("kind", "")
                 wallet_id = event.get("wallet_id", "")
                 instrument = str(event.get("instrument_id", ""))
-                payload = event.get("payload", {})
+                payload = event.get("payload")
                 if not isinstance(payload, dict):
-                    payload = {}
+                    raise TypeError("malformed canonical event payload")
+                if kind == "ACCOUNT_SNAPSHOT":
+                    positions = payload.get("positions")
+                    if not wallet_id or not isinstance(positions, list):
+                        raise ValueError("invalid snapshot envelope; existing state retained")
+                    if any(
+                        not isinstance(pos, dict) or not pos.get("instrument_id")
+                        for pos in positions
+                    ):
+                        raise ValueError("invalid snapshot entry; existing state retained")
                 after_rev = int(event.get("after_revision", 0))
                 event_time = event.get("event_time", now)
 
@@ -364,6 +377,17 @@ class ProjectionStore:
             return None
         return Decimal(row["account_value"]), datetime.fromisoformat(row["observed_at"])
 
+    def list_equities(self) -> dict[str, tuple[Decimal, datetime]]:
+        return {
+            str(row["wallet_id"]): (
+                Decimal(str(row["account_value"])),
+                datetime.fromisoformat(str(row["observed_at"])),
+            )
+            for row in self.conn.execute(
+                "SELECT wallet_id,account_value,observed_at FROM expert_equity"
+            )
+        }
+
     def consume_from_ledger_db(
         self,
         ledger_db_path: Path | str,
@@ -390,6 +414,17 @@ class ProjectionStore:
             ledger_id = row["ledger_id"]
 
             current_offset = self.get_offset(ledger_id)
+            other = self.conn.execute(
+                "SELECT ledger_id FROM consumer_offsets WHERE ledger_id<>? LIMIT 1",
+                (ledger_id,),
+            ).fetchone()
+            if other is not None:
+                raise ValueError("source ledger changed; explicit resnapshot required")
+            meta = conn.execute(
+                "SELECT current_seq,retention_floor FROM ledger_meta LIMIT 1"
+            ).fetchone()
+            if meta is None or current_offset < int(meta["retention_floor"]):
+                raise ValueError("source cursor expired; explicit resnapshot required")
 
             cur = conn.execute(
                 """
@@ -405,15 +440,21 @@ class ProjectionStore:
             )
             rows = cur.fetchall()
             if not rows:
+                if current_offset < int(meta["current_seq"]):
+                    raise ValueError("source tail missing; projection unchanged")
                 return 0
+            if int(rows[0]["seq"]) != current_offset + 1:
+                raise ValueError("source tail gap; projection unchanged")
 
             events: list[dict[str, Any]] = []
             for r in rows:
                 raw_payload = r["payload"]
                 try:
                     payload = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
-                except (json.JSONDecodeError, TypeError):
-                    payload = {}
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise ValueError("malformed source payload; projection unchanged") from exc
+                if not isinstance(payload, dict):
+                    raise TypeError("non-object source payload; projection unchanged")
 
                 events.append({
                     "schema_version": r["schema_version"],

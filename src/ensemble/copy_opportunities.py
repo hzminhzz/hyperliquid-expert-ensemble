@@ -299,8 +299,12 @@ class OpportunityJournal:
             self.policy.min_notional
         ):
             blocker = "BELOW_MATERIALITY_FLOOR"
-        if change.coverage not in ("SUPPORTED", "UNSPECIFIED", "Known", "Full"):
-            blocker = blocker or "PARTIAL_SOURCE_COVERAGE"
+        if change.coverage not in ("SUPPORTED", "Seeded", "KnownFlat"):
+            blocker = blocker or (
+                "SOURCE_COVERAGE_UNVERIFIED"
+                if change.coverage in ("UNSPECIFIED", "UNKNOWN")
+                else "PARTIAL_SOURCE_COVERAGE"
+            )
         earliest = max(change.known_at, now) + self.policy.action_latency
         key = change.source_id + "|" + self.policy.revision
         digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:28]

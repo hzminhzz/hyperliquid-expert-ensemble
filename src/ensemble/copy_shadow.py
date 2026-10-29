@@ -221,9 +221,8 @@ def evaluate(
                 queues.append(research.db.execute(
                     "SELECT d.opportunity_id,d.payload_json "
                     "FROM opportunity_source.opportunity_decisions d "
-                    "WHERE d.first_known_at >= ? "
-                    "AND (d.copy_direction IS NULL OR d.blocker IS NOT NULL "
-                    "OR d.earliest_actionable_at <= ?) "
+                    "WHERE d.first_known_at >= ? AND d.copy_direction IN (-1,1) "
+                    "AND (d.blocker IS NOT NULL OR d.earliest_actionable_at <= ?) "
                     + actionable
                     + "AND NOT EXISTS (SELECT 1 FROM copy_markouts m "
                     "WHERE m.opportunity_id=d.opportunity_id AND m.horizon=?) "

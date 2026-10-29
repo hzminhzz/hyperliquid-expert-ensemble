@@ -560,36 +560,27 @@ def _format_target(
 ) -> str:
     assessment = _assess_target(target, clusters)
     symbol = target.coin.rsplit(":", 1)[-1]
-    emoji = "🟢" if assessment.direction == "LONG" else "🔴" if assessment.direction == "SHORT" else "⚪"
     agreement = (
         f"{assessment.agreement * Decimal(100):.0f}%"
-        if assessment.agreement is not None
-        else "n/a"
+        if assessment.agreement is not None else "n/a"
     )
     coverage = f"{assessment.coverage * Decimal(100):.0f}%"
-    shadow = (
-        f"{assessment.shadow_risk_cap:.2f}R"
-        if assessment.shadow_risk_cap > 0
-        else "0R"
-    )
     return "\n".join(
         [
-            f"{emoji} CLUSTER CONSENSUS · {symbol} · {assessment.direction}",
-            f"Status: {assessment.follow_state} · Grade {assessment.grade}",
-            f"Shadow risk cap: {shadow} · Live size: NOT QUALIFIED",
-            "",
-            f"Consensus: {target.observed_target:+.3f} · Mark: {_price_text(mark)}",
+            f"OBSERVED WALLET CONSENSUS · {symbol} · {assessment.direction}",
+            "DESCRIPTIVE ONLY — NOT AN ENTRY OR POSITION-SIZE RECOMMENDATION",
+            f"Consensus: {target.observed_target:+.3f} · Reference mark: {_price_text(mark)}",
             f"Coverage: {coverage} · Agreement: {agreement}",
             (
-                "Clusters: "
+                "Provisional clusters: "
                 f"{assessment.support_clusters} support / "
                 f"{assessment.oppose_clusters} oppose / "
                 f"{assessment.flat_clusters} flat"
             ),
             f"Uncertainty: [{target.lower_bound:+.3f}, {target.upper_bound:+.3f}]",
-            f"Why: {assessment.rationale}.",
-            "Edge status: prospective predictive edge is not yet qualified (ER4/ER5 pending).",
-            "R = your predefined maximum-loss research unit; no dollar notional is valid until a stop/invalidation model exists.",
+            f"Source gate: {target.blocker_code or 'descriptive evidence available'}.",
+            "Independence, predictive edge and executable entry/size: NOT QUALIFIED.",
+            "No financial execution.",
         ]
     )
 
@@ -661,20 +652,20 @@ class EnsembleRuntime:
 
     def compute_targets(self) -> dict[str, ConsensusTarget]:
         positions = self.store.list_positions()
-        instruments = {p.instrument_id for p in positions} | set(self.prior_targets)
+        by_position = {(p.wallet_id, p.instrument_id): p for p in positions}
+        equities = self.store.list_equities()
+        sample_by_instrument = {p.instrument_id: p for p in positions}
+        instruments = set(sample_by_instrument) | set(self.prior_targets)
         targets: dict[str, ConsensusTarget] = {}
         now = datetime.now(UTC)
 
         for instrument_id in sorted(instruments):
             postures = []
-            sample = next(
-                (p for p in positions if p.instrument_id == instrument_id),
-                None,
-            )
+            sample = sample_by_instrument.get(instrument_id)
             coin = sample.coin if sample is not None else instrument_id.rsplit(":", 1)[-1]
             for wallet in self.settings.experts:
-                pos = self.store.get_position(wallet, instrument_id)
-                equity_row = self.store.get_equity(wallet)
+                pos = by_position.get((wallet, instrument_id))
+                equity_row = equities.get(wallet)
                 equity = equity_row[0] if equity_row else None
                 equity_age = (
                     max(0.0, (now - equity_row[1]).total_seconds() / 60.0)
@@ -859,8 +850,8 @@ class EnsembleRuntime:
             assessment = _assess_target(target, self.clusters)
             symbol = coin.rsplit(":", 1)[-1]
             target_lines.append(
-                f"{symbol}: {assessment.direction} {target.observed_target:+.3f} · "
-                f"{assessment.follow_state} · {assessment.grade}"
+                f"{symbol}: observed {assessment.direction} "
+                f"{target.observed_target:+.3f} · descriptive only"
             )
         return "\n".join(
             [
@@ -871,7 +862,7 @@ class EnsembleRuntime:
                 f"Ledger: {consumed}/{ledger_seq} (lag {max(0, ledger_seq - consumed)})",
                 f"Top targets ({len(targets)} total):",
                 *(target_lines or ["none"]),
-                "Live sizing: NOT QUALIFIED · Execution: FINANCIAL_EFFECT_FORBIDDEN",
+                "Predictive edge and sizing: NOT QUALIFIED · Execution: FINANCIAL_EFFECT_FORBIDDEN",
             ]
         )
 

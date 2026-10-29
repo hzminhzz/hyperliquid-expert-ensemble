@@ -114,6 +114,18 @@ def test_partial_coverage_blocks_entry_but_preserves_reason(tmp_path) -> None:
         j.close()
 
 
+def test_unverified_coverage_is_not_new_predictive_evidence(tmp_path) -> None:
+    journal = OpportunityJournal(tmp_path/"opp.db")
+    try:
+        assert journal.observe(trade(1,"0","1",coverage="UNSPECIFIED")) is None
+        assert journal.stats()["exclusions"]["SOURCE_COVERAGE_UNVERIFIED"] == 1
+        accepted=journal.observe(trade(2,"0","1",wallet="w2",coverage="Seeded"))
+        assert accepted is not None and accepted.copy_direction == 1
+        assert accepted.source_coverage == "Seeded"
+    finally:
+        journal.close()
+
+
 def test_restart_reuses_cursor_and_identity(tmp_path) -> None:
     path=tmp_path/"opp.db"
     j=OpportunityJournal(path)

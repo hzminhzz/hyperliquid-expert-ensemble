@@ -75,9 +75,15 @@ def evaluate_incremental_edge(
                     continue
                 market=Decimal(baseline["market_only_net_return"])
                 signal=Decimal(obs["hypothetical_net_return"])
+                entry_delay=None
+                if obs.get("entry_at") and obs.get("first_actionable_at"):
+                    entry_delay=Decimal(str((
+                        datetime.fromisoformat(obs["entry_at"])
+                        - datetime.fromisoformat(obs["first_actionable_at"])
+                    ).total_seconds()))
                 pairs.append((
                     t,str(decision["instrument_id"]),str(decision["family"]),
-                    str(decision["wallet_id"]),signal-market,
+                    str(decision["wallet_id"]),entry_delay,signal-market,
                 ))
     # Keep the earliest occurrence per instrument/bucket, across all wallets.
     # Prevent 50 wallets in one coin shock manufacturing 50 independent profits.
@@ -93,13 +99,15 @@ def evaluate_incremental_edge(
     by_day:dict[str,list[Decimal]]=defaultdict(list)
     by_coin:dict[str,list[Decimal]]=defaultdict(list)
     by_family:dict[str,list[Decimal]]=defaultdict(list)
-    for when,coin,family,_wallet,lift in independent:
+    for when,coin,family,_wallet,_entry_delay,lift in independent:
         by_day[when.astimezone(UTC).date().isoformat()].append(lift)
         by_coin[coin.rsplit(":",1)[-1]].append(lift)
         by_family[family].append(lift)
     days=len(by_day)
     n=len(independent)
     mean_delta=sum((p[-1] for p in independent),Decimal(0))/Decimal(n) if n else None
+    delays=[p[4] for p in independent if p[4] is not None]
+    mean_delay=sum(delays,Decimal(0))/len(delays) if delays else None
     return {
         "horizon":horizon,
         "control_revision":control_revision,
@@ -107,6 +115,10 @@ def evaluate_incremental_edge(
         "deduped_instrument_time_buckets":n,
         "observed_utc_days":days,
         "mean_incremental_bps":str(mean_delta*Decimal(10_000)) if mean_delta is not None else None,
+        "assumed_action_latency_s":2,
+        "sampled_entry_delay_s_mean":round(float(mean_delay),2) if mean_delay is not None else None,
+        "sampled_entry_delay_s_max":round(float(max(delays)),2) if delays else None,
+        "price_resolution":"ONE_CHECKPOINT_PER_MINUTE_NOT_EXECUTABLE",
         "coin_buckets":{k:len(v) for k,v in sorted(by_coin.items())},
         "family_buckets":{k:len(v) for k,v in sorted(by_family.items())},
         "qualified_executable_pnl":False,
@@ -116,6 +128,7 @@ def evaluate_incremental_edge(
         "limitations":[
             "RETROSPECTIVE_SOURCE_SELECTION",
             "MID_PRICE_PLUS_ASSUMED_COST_NOT_EXECUTABLE",
+            "TWO_SECOND_ACTION_ASSUMPTION_WITH_MINUTE_SAMPLED_ENTRY_PRICE",
             "CONTROL_SELECTION_AND_TUNING_NOT_INDEPENDENT",
             "TIME_BUCKETS_NOT_PROOF_OF_INDEPENDENT_CLUSTERS",
         ],
