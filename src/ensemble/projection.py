@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS expert_equity (
     observed_at        TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS last_feed_gap (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    known_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS worldviews (
     view_id            TEXT    PRIMARY KEY,
     ledger_id          TEXT    NOT NULL,
@@ -201,6 +206,21 @@ class ProjectionStore:
                 after_rev = int(event.get("after_revision", 0))
                 event_time = event.get("event_time", now)
 
+                if kind == "COVERAGE_CHANGE" and payload.get("status") in {
+                    "STARTUP_GAP_UNVERIFIED", "DISCONNECTED_GAP_UNVERIFIED"
+                }:
+                    # A reconnect cannot restore provenance, even for flat wallets.
+                    gap_at = event.get("known_at")
+                    if not isinstance(gap_at,str) or datetime.fromisoformat(gap_at).tzinfo is None:
+                        raise ValueError("feed gap requires source knowledge time")
+                    self.conn.execute(
+                        "INSERT INTO last_feed_gap VALUES (1,?) ON CONFLICT(id) "
+                        "DO UPDATE SET known_at=excluded.known_at",
+                        (gap_at,),
+                    )
+                    self.conn.execute(
+                        "UPDATE projected_positions SET coverage='Degraded'"
+                    )
                 if kind == "ACCOUNT_SNAPSHOT":
                     self.conn.execute(
                         "DELETE FROM projected_positions WHERE wallet_id = ?", (wallet_id,)
@@ -376,6 +396,10 @@ class ProjectionStore:
         if not row:
             return None
         return Decimal(row["account_value"]), datetime.fromisoformat(row["observed_at"])
+
+    def last_feed_gap_at(self) -> datetime | None:
+        row=self.conn.execute("SELECT known_at FROM last_feed_gap WHERE id=1").fetchone()
+        return datetime.fromisoformat(str(row[0])) if row else None
 
     def list_equities(self) -> dict[str, tuple[Decimal, datetime]]:
         return {

@@ -23,6 +23,7 @@ def event(seq: int, kind: str, payload: dict | None, ledger: str = "ledger-one")
         "wallet_id": WALLET,
         "instrument_id": BTC,
         "event_time": STAMP,
+        "known_at": STAMP,
         "after_revision": seq,
         "payload": payload,
     }
@@ -89,6 +90,29 @@ def test_invalid_ledger_json_does_not_advance_offset(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="malformed source payload"):
             store.consume_from_ledger_db(source)
         assert store.get_offset("ledger-one") == 0
+    finally:
+        store.close()
+
+
+def test_feed_gap_invalidates_projected_coverage_until_valid_snapshot(tmp_path: Path) -> None:
+    store=ProjectionStore(tmp_path/"projection.db")
+    try:
+        store.apply_canonical_events("ledger-one", [
+            event(1, "ACCOUNT_SNAPSHOT", snapshot()),
+            event(2, "COVERAGE_CHANGE", {"status":"DISCONNECTED_GAP_UNVERIFIED",
+                                         "history_during_gap":"UNVERIFIED"}),
+        ])
+        degraded=store.get_position(WALLET,BTC)
+        assert degraded is not None and degraded.coverage=="Degraded"
+        assert store.last_feed_gap_at()==datetime.fromisoformat(STAMP)
+        store.apply_canonical_events("ledger-one", [
+            event(3, "COVERAGE_CHANGE", {"status":"SUBSCRIBED_HISTORY_UNVERIFIED"})
+        ])
+        assert store.get_position(WALLET,BTC).coverage=="Degraded"
+        store.apply_canonical_events("ledger-one", [
+            event(4, "ACCOUNT_SNAPSHOT", snapshot()),
+        ])
+        assert store.get_position(WALLET,BTC).coverage=="Seeded"
     finally:
         store.close()
 

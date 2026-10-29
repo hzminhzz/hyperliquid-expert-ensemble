@@ -654,6 +654,7 @@ class EnsembleRuntime:
         positions = self.store.list_positions()
         by_position = {(p.wallet_id, p.instrument_id): p for p in positions}
         equities = self.store.list_equities()
+        last_feed_gap = self.store.last_feed_gap_at()
         sample_by_instrument = {p.instrument_id: p for p in positions}
         instruments = set(sample_by_instrument) | set(self.prior_targets)
         targets: dict[str, ConsensusTarget] = {}
@@ -685,6 +686,15 @@ class EnsembleRuntime:
                         valuation,
                         equity,
                         equity_age_minutes=equity_age,
+                        is_quarantined=(
+                            (pos is not None and pos.coverage in {"Quarantined","Degraded"})
+                            or (last_feed_gap is not None and (
+                                equity_row is None or equity_row[1] <= last_feed_gap
+                            ))
+                        ),
+                        is_unseeded=(
+                            pos is not None and pos.coverage in {"Unseeded","PartialHistory"}
+                        ),
                     )
                 )
             if self.clusters is None:
