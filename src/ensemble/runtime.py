@@ -137,7 +137,9 @@ class RuntimeSettings:
                 in {"1", "true", "yes", "on"}
             ),
             notify_warmup_s=float(os.getenv("ENSEMBLE_NOTIFY_WARMUP_S", "180")),
-            notify_max_per_minute=int(os.getenv("ENSEMBLE_NOTIFY_MAX_PER_MINUTE", "4")),
+            # Hourly digest owns routine Telegram reporting. Individual
+            # consensus changes are opt-in for exceptional installations.
+            notify_max_per_minute=int(os.getenv("ENSEMBLE_NOTIFY_MAX_PER_MINUTE", "0")),
             notify_per_coin_cooldown_s=float(
                 os.getenv("ENSEMBLE_NOTIFY_PER_COIN_COOLDOWN_S", "600")
             ),

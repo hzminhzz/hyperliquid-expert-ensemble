@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from ensemble.copy_digest import publish_digest
+from ensemble.copy_digest import digest_period_key, publish_digest
 
 AT=datetime(2026,10,13,10,tzinfo=UTC)
 
@@ -69,6 +69,33 @@ def test_disk_pressure_warns_without_presenting_trading_advice(tmp_path:Path,mon
     assert len(sent)==1
     assert "OPS WARNING: VPS disk 90% used" in sent[0]
     assert "NOT a copy/entry signal" in sent[0]
+
+
+def test_hourly_periods_are_unique_and_old_twice_daily_periods_do_not_collide()->None:
+    assert digest_period_key(AT)=="2026-10-13T10:00Z"
+    assert digest_period_key(AT.replace(hour=11))=="2026-10-13T11:00Z"
+    assert digest_period_key(AT)!="2026-10-13:0"
+
+
+def test_hourly_digest_is_idempotent_but_next_hour_is_new(tmp_path:Path)->None:
+    source,journal,delivery=fixtures(tmp_path)
+    sent=[]
+    def send(_token,_chat,message):
+        sent.append(message)
+        return True
+    opts={"journal_db":journal,"state_db":delivery,"source_db":source,
+          "now":AT,"token":"dummy","chat_id":"somechat","send":send}
+    assert publish_digest(**opts)["status"]=="DELIVERED_DESCRIPTIVE_ONLY"
+    assert publish_digest(**opts)["status"]=="ALREADY_DELIVERED"
+    later=AT.replace(hour=11)
+    with closing(sqlite3.connect(source)) as db,db:
+        db.execute("UPDATE outbox_events SET known_at=?",(later.isoformat(),))
+    assert publish_digest(**{**opts,"now":later})["status"]=="DELIVERED_DESCRIPTIVE_ONLY"
+    assert len(sent)==2
+    assert "HOURLY DIRECTIONAL WATCH" in sent[0]
+    assert "HOURLY DIRECTIONAL WATCH" in sent[1]
+    assert "Directional context: rolling 4h" in sent[1]
+    assert "Last 1h: 0 entries/adds" in sent[1]
 
 
 def test_failed_delivery_is_retriable_and_observation_staleness_blocks(tmp_path:Path)->None:

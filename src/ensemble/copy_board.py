@@ -38,7 +38,7 @@ def build_trade_flow_board(
         rows=db.execute(
             "SELECT opportunity_id,instrument_id,wallet_id,first_known_at,"
             "family,source_action,copy_direction,blocker FROM opportunity_decisions "
-            "WHERE first_known_at>=? AND first_known_at<=? "
+            "WHERE first_known_at>? AND first_known_at<=? "
             "ORDER BY first_known_at DESC LIMIT ?",
             (since.isoformat(),cut.isoformat(),max_source_rows+1),
         ).fetchall()
@@ -59,15 +59,21 @@ def build_trade_flow_board(
         entry=grouped.setdefault(coin,{
             "coin":coin,"instrument_id":instrument,
             "entry_longs":set(),"entry_shorts":set(),
+            "seen_entry_wallets":set(),
             "de_risk":set(),"exit":set(),
             "new_events":0,"latest_known_at":str(row["first_known_at"]),
         })
         wallet=str(row["wallet_id"]).lower()
         if family in {"ENTER","INCREASE","REVERSE"} and row["blocker"] is None:
-            if row["copy_direction"] == 1:
-                entry["entry_longs"].add(wallet)
-            elif row["copy_direction"] == -1:
-                entry["entry_shorts"].add(wallet)
+            # Rows are newest-first. A wallet reversing within the hour is
+            # represented by its latest entry direction, not two opposing votes.
+            if wallet not in entry["seen_entry_wallets"]:
+                if row["copy_direction"] == 1:
+                    entry["entry_longs"].add(wallet)
+                    entry["seen_entry_wallets"].add(wallet)
+                elif row["copy_direction"] == -1:
+                    entry["entry_shorts"].add(wallet)
+                    entry["seen_entry_wallets"].add(wallet)
             fresh_total+=1
         elif family == "DE_RISK":
             entry["de_risk"].add(wallet)
@@ -80,8 +86,30 @@ def build_trade_flow_board(
         longs=len(entry["entry_longs"])
         shorts=len(entry["entry_shorts"])
         risk=len(entry["de_risk"])
+        # Directional WATCH classification, not predictive or executable advice.
+        # Require at least 3 distinct observed addresses and 2:1 dominance.
+        if longs >= 3 and longs >= 2*max(1,shorts) and longs-shorts >= 2:
+            bias="LONG_WATCH"
+        elif shorts >= 3 and shorts >= 2*max(1,longs) and shorts-longs >= 2:
+            bias="SHORT_WATCH"
+        elif longs and shorts:
+            bias="MIXED"
+        else:
+            bias="INSUFFICIENT_SUPPORT"
+        leaning=bias
+        # Reductions/exits have unknown signed direction. If they involve at
+        # least as many distinct wallets as directional entry support, do NOT
+        # present the pair as a straightforward directional watch.
+        unwind_wallets=len(entry["de_risk"] | entry["exit"])
+        caution=unwind_wallets >= max(longs,shorts) and unwind_wallets>0
+        if caution and bias in {"LONG_WATCH","SHORT_WATCH"}:
+            bias="CAUTION"
         coins.append({
             "coin":entry["coin"],
+            "observed_directional_bias":bias,
+            "underlying_lean":leaning,
+            "risk_reduction_caution":caution,
+            "reduce_or_exit_wallets":unwind_wallets,
             "instrument_id":entry["instrument_id"],
             "long_entry_wallets":longs,
             "short_entry_wallets":shorts,
@@ -121,33 +149,70 @@ def build_trade_flow_board(
     }
 
 
-def render_flow_digest(board:dict[str,Any]) -> str:
-    """Human Telegram HTML summary, no inferred buy/sell instruction."""
+def render_flow_digest(
+    board:dict[str,Any], recent_board:dict[str,Any]|None=None,
+) -> str:
+    """Hourly delivery; 4h flow context and optional 1h flow update."""
     if board.get("status") != "DESCRIPTIVE_ONLY_INDEPENDENCE_NOT_QUALIFIED":
         return "Copytrade flow observation unavailable; no actionable signals."
-    hours=(
-        datetime.fromisoformat(str(board["as_of"]))
-        - datetime.fromisoformat(str(board["window_start"]))
-    ).total_seconds()/3600
+    from zoneinfo import ZoneInfo
+
+    ict=ZoneInfo("Asia/Bangkok")
+    end=datetime.fromisoformat(str(board["as_of"])).astimezone(ict)
+    start=datetime.fromisoformat(str(board["window_start"])).astimezone(ict)
+    window_hours=(end-start).total_seconds()/3600
     lines=[
-        "<b>Hyperliquid | Trade-flow intelligence</b>",
+        "<b>HYPERLIQUID | HOURLY DIRECTIONAL WATCH</b>",
+        f"{end:%H:%M} ICT · {end:%d %b %Y}",
         "<b>DESCRIPTIVE ONLY — NOT a copy/entry signal</b>",
-        (f"Window: last {hours:g}h (UTC);"
-         f" {board['fresh_entry_events']} new entry/add events,"
-         f" {board['de_risk_events']} de-risk events."),
+        f"Directional context: rolling {window_hours:g}h",
     ]
-    if board["truncated"]:
+    recent_by_coin={}
+    if recent_board is not None:
+        recent_by_coin={c["coin"]:c for c in recent_board.get("coins",[])}
+        lines.append(
+            f"Last 1h: {recent_board['fresh_entry_events']} entries/adds · "
+            f"{recent_board['de_risk_events']} de-risk events"
+        )
+    else:
+        lines.append(
+            f"Window: {board['fresh_entry_events']} entries/adds · "
+            f"{board['de_risk_events']} de-risk events"
+        )
+    if board["truncated"] or (recent_board is not None and recent_board["truncated"]):
         lines.append("WARNING: truncated evidence window; totals incomplete.")
     if not board["coins"]:
         lines.append("No new eligible trade observations in the window.")
-    for coin in board["coins"][:5]:
-        ticker=html.escape(str(coin["coin"]))
-        lines.append(
-            f"<b>{ticker}</b>: new long addresses {coin['long_entry_wallets']}, "
-            f"new short addresses {coin['short_entry_wallets']}; "
-            f"de-risk {coin['de_risk_wallets']}; exits {coin['exit_wallets']}"
-        )
+    for directions,title in (
+        ({"LONG_WATCH"},"LONG WATCH — dominant observed long entries"),
+        ({"SHORT_WATCH"},"SHORT WATCH — dominant observed short entries"),
+        ({"MIXED","CAUTION"},"CAUTION / MIXED — conflicting or unwinding"),
+    ):
+        selection=[coin for coin in board["coins"]
+                   if coin.get("observed_directional_bias") in directions][:3]
+        lines.append(f"\n<b>{title}</b>")
+        if not selection:
+            lines.append("None met the descriptive threshold.")
+        for coin in selection:
+            ticker=html.escape(str(coin["coin"]))
+            lean=coin.get("underlying_lean","")
+            caution=f" ({lean.lower().replace('_watch','')}-leaning)" if coin[
+                "observed_directional_bias"
+            ]=="CAUTION" else ""
+            recent=recent_by_coin.get(coin["coin"])
+            hour_detail=(
+                f"; last 1h {recent['long_entry_wallets']}L/"
+                f"{recent['short_entry_wallets']}S"
+                if recent is not None else ("; last 1h 0L/0S" if recent_board else "")
+            )
+            lines.append(
+                f"• {ticker}{caution}: {coin['long_entry_wallets']}L/"
+                f"{coin['short_entry_wallets']}S addresses (4h); "
+                f"reduce {coin['de_risk_wallets']}, exits {coin['exit_wallets']}"
+                f"{hour_detail}"
+            )
     lines.extend([
+        "\nWatch threshold: 3+ addresses, at least 2:1 directional imbalance.",
         "Addresses are NOT validated independent trader clusters.",
         "Predictive edge: NOT QUALIFIED. Entry price/size: NOT AVAILABLE.",
         "Shadow evidence only; no order is placed by this message.",

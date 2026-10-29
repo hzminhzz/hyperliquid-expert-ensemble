@@ -29,6 +29,13 @@ def target(exposure: str):
     )
 
 
+def test_environment_disables_instant_consensus_notifications_by_default(monkeypatch):
+    monkeypatch.delenv("ENSEMBLE_NOTIFY_MAX_PER_MINUTE",raising=False)
+    assert RuntimeSettings.from_env().notify_max_per_minute==0
+    monkeypatch.setenv("ENSEMBLE_NOTIFY_MAX_PER_MINUTE","3")
+    assert RuntimeSettings.from_env().notify_max_per_minute==3
+
+
 def test_only_material_a_b_recommendations_may_notify(monkeypatch, tmp_path):
     settings = RuntimeSettings(
         ledger_db=tmp_path / "ledger.db",

@@ -1,4 +1,4 @@
-"""Explicit, low-frequency Telegram digest for unqualified observed flow.
+"""One hourly Telegram directional watchlist for unqualified observed flow.
 
 The digest is NOT a predictive signal. Never sends orders or a sizing hint.
 Delivery state persists across timer restarts; network ambiguity is retained.
@@ -41,7 +41,7 @@ def _telegram_send(*, token:str, chat_id:str, message:str)->bool:
 
 def digest_period_key(now:datetime)->str:
     t=now.astimezone(UTC)
-    return t.date().isoformat()+f":{t.hour//12}"
+    return f"{t:%Y-%m-%dT%H}:00Z"
 
 
 def publish_digest(
@@ -80,11 +80,14 @@ def publish_digest(
         shadow_cursor=int(row[0] or 0)
     if latest-shadow_cursor>200:
         return {"status":"BLOCKED_SHADOW_CURSOR_STALE","source_lag":latest-shadow_cursor}
-    board=build_trade_flow_board(journal_db=journal_db,now=now,hours=4)
-    if board["truncated"]:
+    board=build_trade_flow_board(
+        journal_db=journal_db,now=now,hours=4,max_coins=20,
+    )
+    recent_board=build_trade_flow_board(
+        journal_db=journal_db,now=now,hours=1,max_coins=20,
+    )
+    if board["truncated"] or recent_board["truncated"]:
         return {"status":"BLOCKED_TRUNCATED_BOARD"}
-    if board["observed_opportunities"]==0:
-        return {"status":"NO_RECENT_OBSERVATIONS"}
     key=digest_period_key(now)
     state_db.parent.mkdir(parents=True,exist_ok=True)
     with closing(sqlite3.connect(state_db,timeout=10)) as state:
@@ -109,7 +112,7 @@ def publish_digest(
             )
         # The short period ID helps humans spot a possible retry duplicate if
         # a process crashes after Telegram acceptance but before local commit.
-        message=render_flow_digest(board)+f"\nDigest: <code>{key}</code>"
+        message=render_flow_digest(board,recent_board)+f"\nDigest: <code>{key}</code>"
         try:
             disk=shutil.disk_usage("/")
             if disk.used/disk.total>=0.85:
@@ -140,7 +143,7 @@ def publish_digest(
 
 
 def main() -> None:
-    parser=argparse.ArgumentParser(description="Send bounded descriptive trade-flow Telegram digest")
+    parser=argparse.ArgumentParser(description="Send an hourly descriptive long/short watchlist")
     parser.add_argument("--send",action="store_true",help="Require explicit sending")
     parser.add_argument("--journal",type=Path,default=DATA/"copy-opportunities-live.db")
     parser.add_argument("--ledger",type=Path,default=DATA/"observation.db")
@@ -148,8 +151,13 @@ def main() -> None:
     args=parser.parse_args()
     now=datetime.now(UTC)
     if not args.send:
-        board=build_trade_flow_board(journal_db=args.journal,now=now)
-        print(render_flow_digest(board))
+        board=build_trade_flow_board(
+            journal_db=args.journal,now=now,hours=4,max_coins=20,
+        )
+        recent_board=build_trade_flow_board(
+            journal_db=args.journal,now=now,hours=1,max_coins=20,
+        )
+        print(render_flow_digest(board,recent_board))
         return
     chat=os.getenv("TELEGRAM_CHAT_ID")
     if not chat:
