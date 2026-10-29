@@ -788,8 +788,13 @@ class EnsembleRuntime:
         absolute targets get the limited delivery slots first.
         """
         now = time.monotonic()
-        if self.settings.notify_max_per_minute <= 0:
-            raise ValueError("ENSEMBLE_NOTIFY_MAX_PER_MINUTE must be positive")
+        if self.settings.notify_max_per_minute < 0:
+            raise ValueError("ENSEMBLE_NOTIFY_MAX_PER_MINUTE cannot be negative")
+        if self.settings.notify_max_per_minute == 0:
+            # Suppress instant alerts, but retain the latest targets for
+            # coherent snapshots and change comparisons.
+            self.prior_targets = targets
+            return
         while self.notification_times and now - self.notification_times[0] >= 60.0:
             self.notification_times.popleft()
         warming_up = now - self.notify_started_at < self.settings.notify_warmup_s

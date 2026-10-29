@@ -36,6 +36,29 @@ def test_environment_disables_instant_consensus_notifications_by_default(monkeyp
     assert RuntimeSettings.from_env().notify_max_per_minute==3
 
 
+def test_zero_instant_notification_budget_suppresses_without_runtime_error(
+    monkeypatch, tmp_path,
+):
+    runtime = EnsembleRuntime(RuntimeSettings(
+        ledger_db=tmp_path/"ledger.db",
+        projection_db=tmp_path/"projection.db",
+        health_path=tmp_path/"health.json",
+        experts=["A","B","C","D"],
+        notify_max_per_minute=0,
+        notify_warmup_s=0,
+    ))
+    sent=[]
+    monkeypatch.setattr("ensemble.runtime._send_telegram",
+                        lambda _s,message: sent.append(message) or True)
+    try:
+        current={COIN:target("0.4")}
+        runtime.maybe_notify(current)
+        assert runtime.prior_targets == current
+        assert sent == []
+    finally:
+        runtime.close()
+
+
 def test_only_material_a_b_recommendations_may_notify(monkeypatch, tmp_path):
     settings = RuntimeSettings(
         ledger_db=tmp_path / "ledger.db",
