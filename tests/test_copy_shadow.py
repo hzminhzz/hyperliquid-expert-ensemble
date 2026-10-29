@@ -5,9 +5,11 @@ import json
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
+from ensemble.copy_opportunities import OpportunityJournal, TradeTransition
 from ensemble.copy_shadow import ShadowConsumer, ShadowSettings, evaluate
 
 T0=datetime(2026,10,13,0,tzinfo=UTC)
@@ -109,6 +111,59 @@ def test_priced_shadow_stores_hypothetical_and_censors_unsupported(tmp_path) -> 
     assert any(o["status"]=="VALID_HYPOTHETICAL" for o in outcomes)
     assert all(o["price_model"]=="MID_TO_MID_HYPOTHETICAL_NOT_EXECUTABLE"
                for o in outcomes)
+
+
+def test_mature_short_horizons_do_not_starve_behind_pending_24h(tmp_path) -> None:
+    prices=tmp_path/"prices.db"
+    outcomes=tmp_path/"results.db"
+    cfg=ShadowSettings(
+        tmp_path/"unused-ledger.db", tmp_path/"copy.db",prices,outcomes,
+    )
+    journal=OpportunityJournal(cfg.journal_db)
+    decisions=[]
+    try:
+        for seq,hours in ((1,0),(2,0),(3,0),(4,2)):
+            known_at=T0+timedelta(hours=hours,seconds=1)
+            decision=journal.observe(TradeTransition(
+                source_id=f"e{seq}",wallet_id=f"w{seq}",
+                instrument_id=BTC,source_kind="OPEN",
+                quantity_before=Decimal(0),quantity_after=Decimal(1),
+                price=Decimal(100),event_at=known_at,
+                known_at=known_at,ledger_id="l",ledger_seq=seq,
+            ),observation_at=known_at)
+            assert decision is not None
+            decisions.append(decision)
+    finally:
+        journal.close()
+
+    with closing(sqlite3.connect(prices)) as db, db:
+        db.execute("""
+            CREATE TABLE reference_mids(
+                instrument_id TEXT,minute_utc TEXT,known_at TEXT,mid TEXT,
+                PRIMARY KEY(instrument_id,minute_utc)
+            )""")
+        for minute in range(181):
+            at=T0+timedelta(minutes=minute,seconds=15)
+            db.execute("INSERT INTO reference_mids VALUES (?,?,?,?)",
+                (BTC,at.replace(second=0).isoformat(),
+                 at.isoformat(),str(100+minute/1000)))
+
+    now=T0+timedelta(hours=3)
+    result=evaluate(cfg,now=now,max_opportunities=2)
+    assert result["inspected"]==2
+    with closing(sqlite3.connect(outcomes)) as db:
+        recent_rows=db.execute(
+            "SELECT horizon,status FROM copy_markouts WHERE opportunity_id=?",
+            (decisions[-1].opportunity_id,),
+        ).fetchall()
+        oldest_rows=db.execute(
+            "SELECT horizon,status FROM copy_markouts WHERE opportunity_id=?",
+            (decisions[0].opportunity_id,),
+        ).fetchall()
+    assert ("5m","VALID_HYPOTHETICAL") in recent_rows
+    assert ("15m","VALID_HYPOTHETICAL") in recent_rows
+    assert ("5m","VALID_HYPOTHETICAL") in oldest_rows
+    assert all(horizon!="24h" for horizon,_ in recent_rows)
 
 
 def test_journal_prospectivity_mode_is_pinned_and_cannot_be_retroactively_relabelled(tmp_path) -> None:

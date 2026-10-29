@@ -12,6 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -205,25 +206,45 @@ def evaluate(
     result={"inspected":0,"valid_hypothetical":0,"censored":0,"pending":0,
             "no_copy":0,"paired_controls":0}
     try:
-        # To preserve bounded work without scanning all historic rows each time,
-        # target oldest opportunities with at least one pending horizon.
+        # Fairly select due horizons, not the oldest incomplete opportunities:
+        # an immature 24h label must never hide a newer, mature 5m/15m/1h label.
+        # Each queue is bounded and read-only; no history or source cursor changes.
         research.db.execute("ATTACH DATABASE ? AS opportunity_source", (str(settings.journal_db),))
-        rows=research.db.execute(
-            "SELECT d.payload_json FROM opportunity_source.opportunity_decisions d "
-            "WHERE d.first_known_at >= ? "
-            "AND (SELECT count(*) FROM copy_markouts m "
-            "WHERE m.opportunity_id=d.opportunity_id) < ? "
-            "ORDER BY d.first_ledger_seq LIMIT ?",
-            ((since or datetime.min.replace(tzinfo=UTC)).isoformat(),
-             len(DEFAULT_HORIZONS),max_opportunities),
-        ).fetchall()
+        queues=[]
+        for horizon,delay in DEFAULT_HORIZONS:
+            ready_cutoff=(now-delay-timedelta(seconds=90)).isoformat()
+            # Preserve old backlog progress while reserving space for newly
+            # mature actionable entries during a burst or after an outage.
+            for recent in (True,False):
+                direction="DESC" if recent else "ASC"
+                actionable="AND d.copy_direction IN (-1,1) AND d.blocker IS NULL " if recent else ""
+                queues.append(research.db.execute(
+                    "SELECT d.opportunity_id,d.payload_json "
+                    "FROM opportunity_source.opportunity_decisions d "
+                    "WHERE d.first_known_at >= ? "
+                    "AND (d.copy_direction IS NULL OR d.blocker IS NOT NULL "
+                    "OR d.earliest_actionable_at <= ?) "
+                    + actionable
+                    + "AND NOT EXISTS (SELECT 1 FROM copy_markouts m "
+                    "WHERE m.opportunity_id=d.opportunity_id AND m.horizon=?) "
+                    + f"ORDER BY d.first_known_at {direction},d.first_ledger_seq {direction} LIMIT ?",
+                    ((since or datetime.min.replace(tzinfo=UTC)).isoformat(),
+                     ready_cutoff,horizon,max_opportunities),
+                ).fetchall())
+        rows=[]
+        selected=set()
+        for round_rows in zip_longest(*queues):
+            for row in round_rows:
+                if row is None or row["opportunity_id"] in selected:
+                    continue
+                selected.add(row["opportunity_id"])
+                rows.append(row)
+                if len(rows)==max_opportunities:
+                    break
+            if len(rows)==max_opportunities:
+                break
         for row in rows:
-            decision=load_decision(str(row[0]))
-            if research.db.execute(
-                "SELECT count(*) FROM copy_markouts WHERE opportunity_id=?",
-                (decision.opportunity_id,),
-            ).fetchone()[0]==len(DEFAULT_HORIZONS):
-                continue
+            decision=load_decision(str(row["payload_json"]))
             mids=price_window(prices,decision.instrument_id,decision.earliest_actionable_at)
             result["inspected"]+=1
             for horizon,_ in DEFAULT_HORIZONS:
