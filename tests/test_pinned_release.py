@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from deploy.pinned_release import install_config, render_unit
+from deploy.pinned_release import ENSEMBLE_UNITS, TIMERS, install_config, render_unit
 
 from ensemble.copy_health import _service_statuses
 
@@ -62,6 +62,19 @@ def test_installed_timer_is_an_independent_copy():
         "[Install]\nWantedBy=timers.target\n"
     )
     assert render_unit(template, **IDENTITY) == template
+
+
+def test_forward_evaluator_and_assessment_timers_are_installed_and_enabled():
+    expected = {
+        "copytrade-forward-evaluate.service",
+        "copytrade-forward-evaluate.timer",
+        "copytrade-forward-assess.service",
+        "copytrade-forward-assess.timer",
+    }
+    assert expected.issubset(set(ENSEMBLE_UNITS))
+    assert {"copytrade-forward-evaluate.timer",
+            "copytrade-forward-assess.timer"}.issubset(set(TIMERS))
+    assert len(TIMERS)==5
 
 
 def test_private_env_is_not_overwritten_with_changed_contents(tmp_path):

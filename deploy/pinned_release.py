@@ -25,12 +25,18 @@ ENSEMBLE_UNITS = (
     "copytrade-opportunity-outcomes.timer",
     "copytrade-flow-digest.service",
     "copytrade-flow-digest.timer",
+    "copytrade-forward-evaluate.service",
+    "copytrade-forward-evaluate.timer",
+    "copytrade-forward-assess.service",
+    "copytrade-forward-assess.timer",
 )
 TRACKER_UNIT = "copytrade-tracker.service"
 TIMERS = (
     "copytrade-opportunity-shadow.timer",
     "copytrade-opportunity-outcomes.timer",
     "copytrade-flow-digest.timer",
+    "copytrade-forward-evaluate.timer",
+    "copytrade-forward-assess.timer",
 )
 DATA = Path.home() / ".local/share/copytrade"
 RELEASES = DATA / "releases"
@@ -281,6 +287,19 @@ def activate(release: Path, ensemble_repo: Path, tracker_repo: Path) -> None:
     backup_root.mkdir(parents=True, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix="activation-", dir=backup_root))
     names = ENSEMBLE_UNITS + (TRACKER_UNIT,)
+    # Preserve previous enablement, not only unit file contents. The original
+    # timers.target.wants links pointed into a mutable checkout even after WP1.
+    # Reenable will replace these with permanent installed-unit-file targets.
+    previously_installed = tuple(
+        name for name in TIMERS if (USER_UNITS / name).exists()
+    )
+    old_enabled = tuple(
+        name for name in previously_installed
+        if subprocess.run(
+            ["systemctl", "--user", "is-enabled", name],
+            capture_output=True, text=True, check=False, timeout=10,
+        ).stdout.strip() == "enabled"
+    )
     for name in names:
         dest = USER_UNITS / name
         if dest.exists():
@@ -288,14 +307,20 @@ def activate(release: Path, ensemble_repo: Path, tracker_repo: Path) -> None:
     def control(*args: str) -> None:
         run("systemctl", "--user", *args, timeout=100)
     def load_old_units() -> None:
-        for item in backup.iterdir():
-            replace_unit(item, USER_UNITS / item.name)
+        for name in names:
+            prior = backup / name
+            if prior.exists():
+                replace_unit(prior, USER_UNITS / name)
+            else:
+                (USER_UNITS / name).unlink(missing_ok=True)
         control("daemon-reload")
     try:
-        control("stop", *TIMERS)
+        if previously_installed:
+            control("stop", *previously_installed)
         for name in names:
             replace_unit(release / "units" / name, USER_UNITS / name)
         control("daemon-reload")
+        control("reenable", *TIMERS)
         control("reset-failed", *TIMERS)
         # Controlled restart: Rust emits a new coverage boundary; no historic relabeling.
         control("restart", TRACKER_UNIT)
@@ -305,10 +330,24 @@ def activate(release: Path, ensemble_repo: Path, tracker_repo: Path) -> None:
             if run("systemctl", "--user", "is-active", name) != "active":
                 raise RuntimeError(f"new deployment not active: {name}")
     except BaseException:
+        # Disable newly introduced or previously disabled timer links before
+        # restoring the former unit files. Never leave an enabled orphan timer.
+        newly_enabled = tuple(name for name in TIMERS if name not in old_enabled)
+        if newly_enabled:
+            try:
+                control("disable", *newly_enabled)
+            except subprocess.CalledProcessError:
+                pass
         load_old_units()
+        if old_enabled:
+            control("reenable", *old_enabled)
         control("restart", TRACKER_UNIT)
         control("restart", "copytrade-ensemble.service")
-        control("start", *TIMERS)
+        restored_timers = tuple(
+            name for name in TIMERS if (USER_UNITS / name).exists()
+        )
+        if restored_timers:
+            control("start", *restored_timers)
         raise
 
     new_cut = ledger_cut()
@@ -323,6 +362,8 @@ def activate(release: Path, ensemble_repo: Path, tracker_repo: Path) -> None:
         "historic_coverage_repaired": False,
         "new_source_coverage": "REQUIRES_VERIFIED_SEED_AND_FEED",
         "backup_units": str(backup),
+        "enabled_timers": list(TIMERS),
+        "prior_enabled_timers": list(old_enabled),
     }
     with (DATA / "release-epochs.jsonl").open("a", encoding="utf-8") as file:
         file.write(json.dumps(epoch, sort_keys=True) + "\n")

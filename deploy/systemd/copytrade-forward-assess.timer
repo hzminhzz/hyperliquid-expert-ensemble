@@ -1,0 +1,11 @@
+[Unit]
+Description=Frozen one-time forward assessment after complete holdout embargo
+
+[Timer]
+OnCalendar=2026-12-02 00:10:00 UTC
+AccuracySec=1min
+Persistent=false
+Unit=copytrade-forward-assess.service
+
+[Install]
+WantedBy=timers.target

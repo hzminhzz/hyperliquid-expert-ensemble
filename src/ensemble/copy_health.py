@@ -48,6 +48,7 @@ def _service_statuses() -> dict[str, str]:
         "collector_timer": "copytrade-opportunity-shadow.timer",
         "evaluator_timer": "copytrade-opportunity-outcomes.timer",
         "digest_timer": "copytrade-flow-digest.timer",
+        "forward_evaluator_timer": "copytrade-forward-evaluate.timer",
     }
     result: dict[str, str] = {}
     for name, unit in units.items():
@@ -70,6 +71,7 @@ def inspect_integrity(
     health_path:Path|None=None,
     opportunity_db:Path|None=None,
     outcome_db:Path|None=None,
+    forward_db:Path|None=None,
     now:datetime|None=None,
     inspect_systemd:bool=False,
 ) -> dict[str,Any]:
@@ -220,6 +222,49 @@ def inspect_integrity(
                     if overdue>3600 and int(count)>0 and horizon in {"5m","15m","1h"}:
                         output["blockers"].append("MATURE_OUTCOME_BACKLOG_"+horizon.upper())
                 outcome_info["mature_pending_by_horizon"]=pending
+    if forward_db is not None:
+        from .copy_forward import PROTOCOL, FrozenEvidence
+
+        if not PROTOCOL.exists():
+            output["forward"]={"status":"FROZEN_PROTOCOL_UNAVAILABLE"}
+            output["blockers"].append("FORWARD_FROZEN_PROTOCOL_MISSING")
+        else:
+            try:
+                protocol=FrozenEvidence(protocol_path=PROTOCOL)
+                forward={
+                    "status":"AWAITING_FROZEN_HOLDOUT",
+                    "protocol_id":protocol.protocol_id,
+                    "holdout_start":protocol.start.isoformat(),
+                    "alpha_qualified":False,
+                    "trading_authorized":False,
+                }
+                if forward_db.exists():
+                    with closing(sqlite3.connect(
+                        f"file:{forward_db}?mode=ro",uri=True,timeout=5
+                    )) as fwd:
+                        count,latest=fwd.execute(
+                            "SELECT COUNT(*),MAX(decision_at) FROM forward_cuts"
+                        ).fetchone()
+                        status_rows=fwd.execute(
+                            "SELECT status,COUNT(*) FROM forward_evaluations "
+                            "GROUP BY status"
+                        ).fetchall()
+                        forward.update({
+                            "cut_count":int(count),
+                            "last_cut":latest,
+                            "outcomes":{str(k):int(n) for k,n in status_rows},
+                        })
+                if now >= protocol.start:
+                    forward["status"]="FORWARD_SHADOW_ONLY_NOT_QUALIFIED"
+                    latest=forward.get("last_cut")
+                    if (now >= protocol.start+timedelta(minutes=15)
+                            and (latest is None or
+                                 now-_utc(str(latest))>timedelta(hours=2))):
+                        output["blockers"].append("FROZEN_HOURLY_CUT_MISSING")
+                output["forward"]=forward
+            except (OSError,ValueError,sqlite3.Error,KeyError):
+                output["forward"]={"status":"INVALID_FROZEN_FORWARD_EVIDENCE"}
+                output["blockers"].append("FROZEN_FORWARD_EVIDENCE_INVALID")
     if health_path is not None and health_path.exists():
         health=json.loads(health_path.read_text())
         stamp=health.get("timestamp")

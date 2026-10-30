@@ -392,6 +392,7 @@ def main(argv: list[str] | None = None) -> None:
             ledger_db=args.ledger, research_db=args.prices,
             opportunity_db=args.journal,outcome_db=args.outcomes,
             health_path=Path("/home/quant/.local/share/copytrade/ensemble-health.json"),
+            forward_db=Path("/home/quant/.local/share/copytrade/copy-forward-hourly.db"),
             inspect_systemd=True,
         )
     else:

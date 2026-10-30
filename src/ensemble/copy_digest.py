@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .copy_board import build_trade_flow_board, render_flow_digest
+from .copy_forward import FORWARD_DB, PROTOCOL, ForwardStore, FrozenEvidence, record_hourly
 
 DATA=Path("/home/quant/.local/share/copytrade")
 
@@ -53,6 +54,11 @@ def publish_digest(
     token:str|None,
     chat_id:str|None,
     send:Callable[[str,str,str],bool]|None=None,
+    capture_forward:bool=False,
+    forward_db:Path=FORWARD_DB,
+    protocol_path:Path=PROTOCOL,
+    price_db:Path=DATA/"market-reference.db",
+    receipt_clock:Callable[[],datetime]|None=None,
 ) -> dict[str,Any]:
     if now.tzinfo is None:
         raise ValueError("timezone-aware time required")
@@ -110,9 +116,45 @@ def publish_digest(
                 "SET attempt_count=attempt_count+1,last_attempt_at=excluded.last_attempt_at",
                 (key,now.isoformat()),
             )
-        # The short period ID helps humans spot a possible retry duplicate if
-        # a process crashes after Telegram acceptance but before local commit.
+        # Freeze the as-known research hypothesis BEFORE attempting delivery.
+        # Do not make the descriptive digest dependent on experimental code.
+        forward_result:dict[str,Any]={"status":"DISABLED"}
+        if capture_forward:
+            try:
+                forward_result=record_hourly(
+                    frozen=FrozenEvidence(protocol_path=protocol_path),
+                    forward_db=forward_db,journal_db=journal_db,
+                    source_db=source_db,decided_at=now,period=key,
+                    price_db=price_db,physical_clock=receipt_clock,
+                )
+            except (OSError,ValueError,RuntimeError,sqlite3.Error) as err:
+                forward_result={"status":"RESEARCH_CAPTURE_BLOCKED",
+                                "reason":type(err).__name__}
+        # A period ID helps operators reconcile ambiguous Telegram retries.
         message=render_flow_digest(board,recent_board)+f"\nDigest: <code>{key}</code>"
+        if forward_result["status"] in ("RECORDED_RESEARCH_ONLY","ALREADY_RECORDED"):
+            from html import escape
+
+            candidates=forward_result.get("candidate_preview",[])
+            appendix=(
+                "\n<b>Frozen 1h research hypotheses — NOT trading signals</b>"
+                "\n" + (
+                    ", ".join(
+                        escape(str(coin).removeprefix(
+                            "hyperliquid:mainnet:perp:default:"
+                        )) + (" long" if side==1 else " short")
+                        for coin,side in candidates
+                    ) if candidates else "No supported directional hypothesis."
+                )
+                + "\nUnverified independence, execution cost, and wallet skill."
+            )
+            if len(message)+len(appendix) <= 3800:
+                message+=appendix
+            else:
+                forward_result["status"]="RESEARCH_DISPLAY_CAP_EXCEEDED"
+                message+="\nForward research list unavailable; no entry signal."
+        elif capture_forward and forward_result["status"] != "OUTSIDE_FROZEN_HOLDOUT":
+            message+="\nForward research measurement unavailable; no entry signal."
         try:
             disk=shutil.disk_usage("/")
             if disk.used/disk.total>=0.85:
@@ -123,22 +165,49 @@ def publish_digest(
         except OSError:
             pass
         sender=send or (lambda t,c,m:_telegram_send(token=t,chat_id=c,message=m))
+        actual_clock=receipt_clock or (lambda:datetime.now(UTC))
+        attempted=actual_clock()
+        forward_cut=forward_result.get("cut_id") if forward_result["status"] in (
+            "RECORDED_RESEARCH_ONLY","ALREADY_RECORDED"
+        ) else None
+
+        def record_attempt(status:str,acked:datetime|None=None)->bool:
+            if not forward_cut:
+                return False
+            try:
+                with ForwardStore(forward_db) as store:
+                    store.append_delivery(
+                        cut_id=str(forward_cut),attempted=attempted,
+                        status=status,acknowledged=acked,
+                    )
+                return True
+            except (sqlite3.Error,OSError,ValueError):
+                return False
+
         try:
             success=sender(token,chat_id,message)
         except (OSError,TimeoutError,ValueError,urllib.error.URLError):
-            return {"status":"DELIVERY_UNCONFIRMED","period":key}
+            record_attempt("UNCONFIRMED")
+            return {"status":"DELIVERY_UNCONFIRMED","period":key,
+                    "forward_capture":forward_result["status"]}
         if not success:
-            return {"status":"DELIVERY_NOT_ACKNOWLEDGED","period":key}
+            record_attempt("REJECTED")
+            return {"status":"DELIVERY_NOT_ACKNOWLEDGED","period":key,
+                    "forward_capture":forward_result["status"]}
+        actual_ack=actual_clock()
+        recorded=record_attempt("ACKNOWLEDGED",actual_ack)
         with state:
             state.execute(
                 "UPDATE digest_delivery SET status='DELIVERED',delivered_at=? "
-                "WHERE period=?",(now.isoformat(),key),
+                "WHERE period=?",(actual_ack.isoformat(),key),
             )
         return {
             "status":"DELIVERED_DESCRIPTIVE_ONLY","period":key,
             "source_lag":latest-shadow_cursor,
             "coins_in_board":board["coin_count"],
             "predictive_qualified":False,
+            "forward_capture":forward_result["status"],
+            "forward_ack_recorded":recorded,
         }
 
 
@@ -148,6 +217,10 @@ def main() -> None:
     parser.add_argument("--journal",type=Path,default=DATA/"copy-opportunities-live.db")
     parser.add_argument("--ledger",type=Path,default=DATA/"observation.db")
     parser.add_argument("--state",type=Path,default=DATA/"copy-digest-delivery.db")
+    parser.add_argument("--capture-forward",action="store_true")
+    parser.add_argument("--protocol",type=Path,default=PROTOCOL)
+    parser.add_argument("--forward",type=Path,default=FORWARD_DB)
+    parser.add_argument("--prices",type=Path,default=DATA/"market-reference.db")
     args=parser.parse_args()
     now=datetime.now(UTC)
     if not args.send:
@@ -167,6 +240,8 @@ def main() -> None:
     result=publish_digest(
         journal_db=args.journal,state_db=args.state,source_db=args.ledger,
         now=now,token=os.getenv("TELEGRAM_BOT_TOKEN"),chat_id=chat,
+        capture_forward=args.capture_forward,forward_db=args.forward,
+        protocol_path=args.protocol,price_db=args.prices,
     )
     print(json.dumps(result,sort_keys=True))
 
