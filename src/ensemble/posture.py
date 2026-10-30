@@ -96,8 +96,8 @@ def compute_posture(
             reason="expert has not completed startup seed",
         )
 
-    # 3. Missing or non-positive equity makes normalization unavailable
-    if equity is None or equity <= Decimal(0):
+    # 3. Missing equity means there is no authoritative account snapshot to normalize against.
+    if equity is None:
         return ExpertPosture(
             expert_id=expert_id,
             coin=coin,
@@ -110,7 +110,7 @@ def compute_posture(
             reason="equity is missing or non-positive",
         )
 
-    # 4. Stale equity cannot silently produce fresh posture
+    # 4. Stale account state cannot silently produce fresh posture, even when currently flat.
     if equity_age_minutes > max_equity_age_minutes:
         return ExpertPosture(
             expert_id=expert_id,
@@ -124,7 +124,8 @@ def compute_posture(
             reason=f"equity is stale ({equity_age_minutes:.1f}m > {max_equity_age_minutes:.1f}m)",
         )
 
-    # 5. Known flat: reliably observed 0 size contributes exactly 0
+    # 5. A fresh authoritative flat snapshot is exactly zero exposure even if account value is
+    # zero. No division is required, so zero equity must not create artificial missing mass.
     if quantity == Decimal(0):
         return ExpertPosture(
             expert_id=expert_id,
@@ -138,7 +139,21 @@ def compute_posture(
             reason="reliably observed flat position",
         )
 
-    # 6. Eligible position: calculate normalized posture
+    # 6. Non-positive equity makes non-flat normalization unavailable.
+    if equity <= Decimal(0):
+        return ExpertPosture(
+            expert_id=expert_id,
+            coin=coin,
+            quantity=quantity,
+            valuation_price=valuation_price,
+            equity=equity,
+            raw_exposure=None,
+            clipped_posture=Decimal("0.0"),
+            state=EligibilityState.UNAVAILABLE,
+            reason="equity is missing or non-positive",
+        )
+
+    # 7. Eligible position: calculate normalized posture
     notional = quantity * valuation_price
     raw_exposure = notional / equity
     scaled = raw_exposure / k_scale

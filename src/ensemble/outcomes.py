@@ -26,6 +26,7 @@ DEFAULT_OUTCOME_HORIZONS: tuple[tuple[str, timedelta], ...] = (
 class PricePoint:
     at: datetime
     price: Decimal
+    known_at: datetime | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -34,6 +35,7 @@ class OutcomeSource:
     coin: str
     emitted_at: datetime
     signal_price: Decimal
+    direction: int = 1
     context: tuple[tuple[str, str], ...] = ()
     coverage: tuple[tuple[str, str], ...] = ()
     restated_after_emission: bool = False
@@ -47,6 +49,7 @@ class OutcomeManifest:
     horizons: tuple[tuple[str, int], ...]
     latency_ms: int
     cost_bps: Decimal
+    max_price_lateness_seconds: int
     created_at: datetime
 
 
@@ -77,6 +80,7 @@ def _jsonable_source(source: OutcomeSource) -> dict[str, Any]:
         "coin": source.coin,
         "emitted_at": source.emitted_at.isoformat(),
         "signal_price": str(source.signal_price),
+        "direction": source.direction,
         "context": list(source.context),
         "coverage": list(source.coverage),
         "restated_after_emission": source.restated_after_emission,
@@ -90,6 +94,7 @@ def seal_outcome_manifest(
     horizons: Sequence[tuple[str, timedelta]] = DEFAULT_OUTCOME_HORIZONS,
     latency_ms: int = 0,
     cost_bps: Decimal = Decimal(0),
+    max_price_lateness: timedelta = timedelta(seconds=60),
 ) -> OutcomeManifest:
     """Create a deterministic sealed manifest for reproducible outcome attachment."""
     normalized_sources = tuple(sorted(sources, key=lambda source: source.source_id))
@@ -101,6 +106,7 @@ def seal_outcome_manifest(
         "horizons": list(normalized_horizons),
         "latency_ms": latency_ms,
         "cost_bps": str(cost_bps),
+        "max_price_lateness_seconds": int(max_price_lateness.total_seconds()),
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -112,6 +118,7 @@ def seal_outcome_manifest(
         horizons=normalized_horizons,
         latency_ms=latency_ms,
         cost_bps=cost_bps,
+        max_price_lateness_seconds=int(max_price_lateness.total_seconds()),
         created_at=created_at,
     )
 
@@ -142,6 +149,11 @@ def compute_outcome_record(
     horizon_point = _first_at_or_after(ordered, horizon_at)
     if latency_point is None or horizon_point is None:
         return None
+    max_lateness = timedelta(seconds=manifest.max_price_lateness_seconds)
+    if latency_point.at > latency_at + max_lateness:
+        return None
+    if horizon_point.at > horizon_at + max_lateness:
+        return None
     if source.signal_price <= 0 or latency_point.price <= 0:
         raise ValueError("outcome prices must be positive")
 
@@ -156,7 +168,9 @@ def compute_outcome_record(
     raw_return = horizon_point.price / source.signal_price - Decimal(1)
     latency_return = horizon_point.price / latency_point.price - Decimal(1)
     cost_fraction = manifest.cost_bps / Decimal(10_000)
-    net_return = latency_return - cost_fraction
+    if source.direction not in (-1, 1):
+        raise ValueError("outcome direction must be -1 or 1")
+    net_return = Decimal(source.direction) * latency_return - cost_fraction
     path_returns = [
         point.price / latency_point.price - Decimal(1)
         for point in path
@@ -179,7 +193,10 @@ def compute_outcome_record(
         context=source.context,
         coverage=source.coverage,
         restated_after_emission=source.restated_after_emission,
-        outcome_known_at=horizon_point.at,
+        outcome_known_at=max(
+            horizon_point.known_at or horizon_point.at,
+            latency_point.known_at or latency_point.at,
+        ),
     )
 
 
@@ -207,6 +224,7 @@ def _manifest_payload(manifest: OutcomeManifest) -> str:
         "horizons": list(manifest.horizons),
         "latency_ms": manifest.latency_ms,
         "cost_bps": str(manifest.cost_bps),
+        "max_price_lateness_seconds": manifest.max_price_lateness_seconds,
         "created_at": manifest.created_at.isoformat(),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))

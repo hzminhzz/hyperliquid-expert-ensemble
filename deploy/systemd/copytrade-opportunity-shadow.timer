@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic bounded Hyperliquid copy-opportunity shadow scan
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=20s
+AccuracySec=2s
+Persistent=false
+Unit=copytrade-opportunity-shadow.service
+
+[Install]
+WantedBy=timers.target

@@ -48,16 +48,41 @@ class IntentEvent:
     kind: IntentKind
     quantity_before: Decimal
     quantity_after: Decimal
+    # Backward-compatible per-event view only. ER1 aggregation never sums this field.
     delta_bias: Decimal | None
     event_time: datetime
     known_at: datetime
+
+    @property
+    def delta_quantity(self) -> Decimal:
+        return self.quantity_after - self.quantity_before
 
 
 @dataclass(slots=True, frozen=True)
 class FlowValue:
     horizon: str
-    delta_bias: Decimal
+    net_quantity: Decimal
+    gross_quantity: Decimal
+    delta_bias: Decimal | None
+    gross_bias: Decimal | None
+    net_to_gross: Decimal | None
+    build_rate_per_second: Decimal
+    quantity_excursion: Decimal
+    recent_close: bool
     event_count: int
+    first_event_time: datetime | None
+    last_event_time: datetime | None
+
+
+@dataclass(slots=True, frozen=True)
+class TransitionLeg:
+    kind: IntentKind
+    quantity_before: Decimal
+    quantity_after: Decimal
+
+    @property
+    def delta_quantity(self) -> Decimal:
+        return self.quantity_after - self.quantity_before
 
 
 @dataclass(slots=True, frozen=True)
@@ -82,6 +107,8 @@ class WalletEvidence:
     knowledge_time: datetime
     evidence_refs: tuple[str, ...]
     missing_reasons: tuple[str, ...]
+    normalization_anchor_time: datetime | None
+    normalization_available: bool
 
 
 def _sign(value: Decimal) -> int:
@@ -107,6 +134,35 @@ def classify_intent(quantity_before: Decimal, quantity_after: Decimal) -> Intent
     if abs(quantity_after) < abs(quantity_before):
         return IntentKind.REDUCE
     return None
+
+
+def allocate_transition_legs(
+    quantity_before: Decimal, quantity_after: Decimal
+) -> tuple[TransitionLeg, ...]:
+    """Return disjoint lifecycle legs without creating extra executed quantity."""
+    kind = classify_intent(quantity_before, quantity_after)
+    if kind is None:
+        return ()
+    if kind is not IntentKind.FLIP:
+        return (
+            TransitionLeg(
+                kind=kind,
+                quantity_before=quantity_before,
+                quantity_after=quantity_after,
+            ),
+        )
+    return (
+        TransitionLeg(
+            kind=IntentKind.CLOSE,
+            quantity_before=quantity_before,
+            quantity_after=Decimal(0),
+        ),
+        TransitionLeg(
+            kind=IntentKind.OPEN,
+            quantity_before=Decimal(0),
+            quantity_after=quantity_after,
+        ),
+    )
 
 
 def derive_intent_event(
@@ -151,30 +207,80 @@ def compute_intent_flow(
     events: Sequence[IntentEvent],
     *,
     knowledge_time: datetime,
+    as_of: datetime | None = None,
+    valuation_price: Decimal | None = None,
+    equity: Decimal | None = None,
+    normalization_available: bool | None = None,
     windows: Sequence[tuple[str, timedelta]] = DEFAULT_FLOW_WINDOWS,
 ) -> tuple[FlowValue, ...]:
-    """Compute no-decay point-in-time intent-flow window sums.
+    """Compute additive flow at one event/knowledge cut.
 
-    Window membership uses known_at so later-arriving events cannot leak into
-    an earlier as-known decision.
+    ``known_at`` controls visibility; ``event_time`` controls horizon membership.
+    Quantity is accumulated before one common normalization anchor is applied.
     """
-    visible = [event for event in events if event.known_at <= knowledge_time]
+    cut_time = as_of or knowledge_time
+    visible = [
+        event
+        for event in events
+        if event.known_at <= knowledge_time and event.event_time <= cut_time
+    ]
+    can_normalize = (
+        normalization_available
+        if normalization_available is not None
+        else valuation_price is not None and equity is not None and equity > 0
+    )
+    if can_normalize and (valuation_price is None or equity is None or equity <= 0):
+        can_normalize = False
+
     values: list[FlowValue] = []
     for label, window in windows:
-        start = knowledge_time - window
+        start = cut_time - window
         selected = [
-            event
-            for event in visible
-            if start < event.known_at <= knowledge_time and event.delta_bias is not None
+            event for event in visible if start < event.event_time <= cut_time
         ]
+        net_quantity = sum(
+            (event.delta_quantity for event in selected), start=Decimal(0)
+        )
+        gross_quantity = sum(
+            (abs(event.delta_quantity) for event in selected), start=Decimal(0)
+        )
+        normalized_net: Decimal | None = None
+        normalized_gross: Decimal | None = None
+        if can_normalize and valuation_price is not None and equity is not None:
+            scale = valuation_price / equity
+            normalized_net = scale * net_quantity
+            normalized_gross = scale * gross_quantity
+        net_to_gross = (
+            abs(net_quantity) / gross_quantity if gross_quantity > 0 else None
+        )
+        ordered = sorted(
+            selected,
+            key=lambda event: (event.event_time, event.known_at, event.event_id),
+        )
+        cumulative = Decimal(0)
+        path = [Decimal(0)]
+        for event in ordered:
+            cumulative += event.delta_quantity
+            path.append(cumulative)
+        excursion = max(path) - min(path)
+        window_seconds = Decimal(str(window.total_seconds()))
+        build_rate = net_quantity / window_seconds if window_seconds > 0 else Decimal(0)
         values.append(
             FlowValue(
                 horizon=label,
-                delta_bias=sum(
-                    (event.delta_bias for event in selected if event.delta_bias is not None),
-                    start=Decimal(0),
+                net_quantity=net_quantity,
+                gross_quantity=gross_quantity,
+                delta_bias=normalized_net,
+                gross_bias=normalized_gross,
+                net_to_gross=net_to_gross,
+                build_rate_per_second=build_rate,
+                quantity_excursion=excursion,
+                recent_close=any(
+                    event.kind in (IntentKind.CLOSE, IntentKind.FLIP) for event in selected
                 ),
                 event_count=len(selected),
+                first_event_time=ordered[0].event_time if ordered else None,
+                last_event_time=ordered[-1].event_time if ordered else None,
             )
         )
     return tuple(values)
@@ -249,13 +355,21 @@ def build_wallet_evidence(
         bounded_influence = None
 
     visible_events = sorted(
-        (event for event in intent_events if event.known_at <= knowledge_time),
-        key=lambda event: (event.known_at, event.event_time, event.event_id),
+        (
+            event
+            for event in intent_events
+            if event.known_at <= knowledge_time and event.event_time <= as_of
+        ),
+        key=lambda event: (event.event_time, event.known_at, event.event_id),
     )
     last_intent = visible_events[-1] if visible_events else None
 
     instrument_notional = quantity * valuation_price
     missing_reasons = (posture.reason,) if posture.reason else ()
+    normalization_available = posture.state in (
+        EligibilityState.ELIGIBLE,
+        EligibilityState.KNOWN_FLAT,
+    )
 
     position_age = (
         _elapsed_seconds(as_of, position_opened_at)
@@ -289,6 +403,10 @@ def build_wallet_evidence(
         intent_flow=compute_intent_flow(
             visible_events,
             knowledge_time=knowledge_time,
+            as_of=as_of,
+            valuation_price=valuation_price,
+            equity=equity,
+            normalization_available=normalization_available,
             windows=flow_windows,
         ),
         input_revision=input_revision,
@@ -296,4 +414,6 @@ def build_wallet_evidence(
         knowledge_time=knowledge_time,
         evidence_refs=tuple(evidence_refs),
         missing_reasons=missing_reasons,
+        normalization_anchor_time=(observation_time if normalization_available else None),
+        normalization_available=normalization_available,
     )

@@ -1,0 +1,18 @@
+[Unit]
+Description=Copytrade cost-aware shadow outcomes (hypothetical only)
+After=copytrade-opportunity-shadow.service
+Wants=copytrade-opportunity-shadow.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/quant/dev/hyperliquid-expert-ensemble
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/quant/dev/hyperliquid-expert-ensemble/.venv/bin/python -m ensemble.copy_shadow evaluate --journal /home/quant/.local/share/copytrade/copy-opportunities-live.db --prices /home/quant/.local/share/copytrade/market-reference.db --outcomes /home/quant/.local/share/copytrade/copy-outcomes-live.db --limit 250
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+MemoryHigh=192M
+MemoryMax=384M
+CPUQuota=20%
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=90

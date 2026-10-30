@@ -1,0 +1,17 @@
+[Unit]
+Description=One-shot frozen WP4 forward research assessment, permanently non-executable
+After=copytrade-forward-evaluate.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/quant/dev/hyperliquid-expert-ensemble
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/home/quant/dev/hyperliquid-expert-ensemble/.venv/bin/python -m ensemble.copy_forward_assess assess --output /home/quant/.local/share/copytrade/reports/wp3-20261030/assessment/final-report.json
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+MemoryHigh=256M
+MemoryMax=512M
+CPUQuota=30%
+Nice=10
+TimeoutStartSec=180
