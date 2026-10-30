@@ -385,8 +385,11 @@ def test_prices_do_not_require_broker_credentials():
     # Instrument resolving must reject opaque, invalid or unsupportable DEX IDs.
     with pytest.raises(MarketDataBlocked, match="UNSUPPORTED_MARKET_SYMBOL"):
         VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:default:#999")
+    assert VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:io:ANTH") == Path(
+        "crypto_futures_ohlcv_1m_HYPERLIQUID_IO_PERP/symbol=ANTH"
+    )
     with pytest.raises(MarketDataBlocked, match="UNSUPPORTED_HIP3_DEX"):
-        VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:io:ANTH")
+        VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:unknown:ANTH")
     assert VerifiedHyperliquidMinuteSource._family(BTC) == Path(
         "crypto_futures_ohlcv_1m_HYPERLIQUID_BTC_PERP"
     )

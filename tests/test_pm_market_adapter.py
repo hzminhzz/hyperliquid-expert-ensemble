@@ -50,7 +50,9 @@ def _fixture(root: Path, instrument: str, *, invalid=False, duplicates=False):
         "sha256": sha256(data.read_bytes()).hexdigest(),
         "exchange": "hyperliquid_futures",
         "source_type": "trades",
-        "source_symbol": "xyz:" + sym if ":xyz:" in instrument else sym,
+        "source_symbol": (
+            instrument.split(":")[3] + ":" + sym if instrument.split(":")[3] != "default" else sym
+        ),
     }
     (folder / "source.json").write_text(json.dumps(source))
     return folder
@@ -97,9 +99,29 @@ def test_corrupted_native_parquet_never_used(tmp_path):
         VerifiedHyperliquidMinuteSource(tmp_path).get(BTC, START)
 
 
-def test_valid_case_sensitive_symbol_and_missing_hip3_dex_not_mapped():
+def test_valid_case_sensitive_symbol_and_isolated_hip3_dex():
     assert VerifiedHyperliquidMinuteSource._family(
         "hyperliquid:mainnet:perp:default:kPEPE"
     ) == Path("crypto_futures_ohlcv_1m_HYPERLIQUID_kPEPE_PERP")
+    assert VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:io:ANTH") == Path(
+        "crypto_futures_ohlcv_1m_HYPERLIQUID_IO_PERP/symbol=ANTH"
+    )
+    assert VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:para:VST") == Path(
+        "crypto_futures_ohlcv_1m_HYPERLIQUID_PARA_PERP/symbol=VST"
+    )
+    assert VerifiedHyperliquidMinuteSource._family(
+        "hyperliquid:mainnet:perp:xyz:ANTH"
+    ) != VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:io:ANTH")
     with pytest.raises(MarketDataBlocked, match="UNSUPPORTED_HIP3_DEX"):
-        VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:io:ANTH")
+        VerifiedHyperliquidMinuteSource._family("hyperliquid:mainnet:perp:other:ANTH")
+
+
+def test_native_io_venue_identity_attested(tmp_path):
+    instrument = "hyperliquid:mainnet:perp:io:ANTH"
+    folder = _fixture(tmp_path, instrument)
+    assert VerifiedHyperliquidMinuteSource(tmp_path).get(instrument, START).open == 100
+    meta = json.loads((folder / "source.json").read_text())
+    meta["source_symbol"] = "para:ANTH"
+    (folder / "source.json").write_text(json.dumps(meta))
+    with pytest.raises(MarketDataBlocked, match="WRONG_MARKET_SYMBOL"):
+        VerifiedHyperliquidMinuteSource(tmp_path).get(instrument, START)

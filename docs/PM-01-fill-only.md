@@ -127,6 +127,95 @@ Re-running the two audit/replay commands above makes no provider requests.
 source account equity/funding/collateral accounting, and genuine prospective
 signal receipt clocks.
 
+## 2026-10-31 further correction — executable-minute accounting, native HIP-3 and expanded coverage
+
+This section supersedes the older market-day counts and the former
+classification of every non-`xyz` HIP-3 DEX as unsupported. No source
+history, wallet-fill first-known clock, or economic qualification has been
+manufactured to turn a red result green.
+
+**New evidence:** Continued HyperX/CHD research on the PM-01 branch was
+performed directly, leaving all original private HyperX pages intact and
+preserving all user-owned pre-existing dirty/untracked `ml4t-data` code.
+
+- **Additional canonical native 1m partitions: 23 days**, all from CHD
+  `hyperliquid_futures` trades, per-day SHA validated. They include default
+  perps `ALGO`, `POL`, `ETC`, `MET`, `VIRTUAL`, `ATOM`, `SEI`,
+  `BRETT`, `PYTH`, `TIA`, `ALT`, HIP-3 `xyz:AMD`, `io:ANTH`, and
+  `para:VST`. They were added only where canonical partitions did not
+  previously exist. The original source in `ml4t-data` was never
+  overwritten; its independent Git worktree remains unchanged.
+- CHD verified it really **supplies HIP-3 trade data** even when
+  `list_symbols` omits namespaced coins. A direct `io:ANTH` query for
+  2026-10-15 returned **139,070 trades**; `para:VST` for the same day
+  returned **10,796 trades**. The new bounded
+  `ensemble.pm_chd_hip3_1m` tool reuses
+  `ml4t-data/scripts/build_hyperliquid_rwa_1m_from_chd.build`, checks
+  the source row namespace and identity, and writes exclusive
+  `HYPERLIQUID_IO_PERP/symbol=ANTH` or
+  `HYPERLIQUID_PARA_PERP/symbol=VST` leaves. Unknown DEXes remain blocked.
+  No cross-DEX price substitution is permitted.
+- **Two `kPEPE` study days had no CHD trade archive**: 2026-10-23 and
+  2026-10-27. CHD negative source metadata is classified separately as
+  `CHD_CONFIRMED_NO_TRADE_SOURCE`. Those days remain non-executable and
+  must not be backfilled with a similarly named asset.
+- **Execution-minutes were over-counted previously:** multiple wallet fills
+  sharing a *scheduled hypothetical 1m execution open* caused repeated
+  virtual rebalances against one minute's volume. The corrected follower
+  aggregates all preceding source updates into **one whole-book target**
+  per delayed minute, then consumes the per-minute liquidity cap once.
+  The adversarial test first failed (6 fills instead of 4); implementation
+  now passes. In the existing VS077 case, the 5m/15m scenario changed
+  from 28 to 26 modeled fills; PnL changed only at numerical-roundoff.
+- The market audit now includes **all 5m/15m/60m scheduled execution-day
+  requirements AND terminal mark days for open legs**. This intentionally
+  expanded the audited population: former **2,401** day combinations are
+  not directly comparable to the new **2,433**. Latest live-lake SHA
+  audit: **1,504/2,433 verified, 929 unavailable** (927 missing
+  day partitions, 2 explicit CHD no-source days). A day-level SHA
+  alone never proves a specific execution minute has nonzero trades
+  or actual order-book liquidity.
+- All 36 wallets now have deterministic evidence cards in
+  `ensemble.pm_fill_cards`. Examples `CA-005`, `W042`, `VS066`
+  include frozen source classification, 5/15/60m modeled outcomes,
+  missing first-known evidence, missing whole-account equity/collateral
+  and explicit **NO QUALIFIED PROSPECTIVE FOLLOWER**. These are
+  descriptions, not a pod-ranking recommendation.
+
+**Frozen 36-wallet replay after these corrections** (original HyperX and
+four SHA-audited new source generations, all source events limited to
+2026-10-29 17:22:16.142 UTC):
+
+| Research risk budget | Completed hindsight-only scenarios | Blocked scenarios | Qualified prospective wallets |
+|---|---:|---:|---:|
+| 1% of hypothetical $100k gross capital | 3 (VS077 only) | 105 | **0** |
+| 10% of hypothetical $100k gross capital | 0 | 108 | **0** |
+
+VS077's three historical PnL values were **+$221.40 / +$219.75 /
++$232.43** (5/15/60-minute delay), exactly equal to its matched
+always-long control in every scenario. **No transferable alpha is
+established**. The meaningful 2026 wallet fill-position gaps remain 15,
+including W035/HBAR and W041/AVAX; missing complete account state and
+genuine first-known clock still block source/forward qualification.
+
+Content-addressed private evidence (under
+`/home/quant/.local/share/copytrade/reports/pm01-36-shadow/`):
+
+- Expanded market coverage audit SHA:
+  `449af1e0091c7b6d7f86f2d95246009cfda09589fbf00298b08c0abd93131e9a`.
+- 1%-gross all-36 replay with candidate evidence cards SHA:
+  `ae63684d4652d843aece649f80b522634861da4bd7ed9241dedc9dc024383c68`.
+- 10%-gross all-36 replay SHA:
+  `187dd7dd7ec2209305e23f316489f305dbaf9918a67bfe95d17166d1e9685a5c`.
+- Private CHD HIP-3 source and partition SHAs are recorded in each
+  `pm01_chd_namespaced_hip3_1m_acquisition_v1` JSON artifact.
+
+**Do not close Issue #3 for scientific qualification:** the absence of
+complete wallet-account equity, 15 source-position breaks, 929 missing
+or unavailable market-days, absence of executable L2 quotes and true
+first-known follower observations are independent unresolved blockers.
+`PM-02` is a separate session and untouched.
+
 ## Non-negotiable caveats and unfinished PM-01 gates
 
 1. **Vendor-listed-book is not whole Hyperliquid exchange account:** the vendor's current 90-day instrument roster may omit prior-only instruments, vault/DEX account scopes, funding/collateral/cash changes and liquidation economics. Initial signed exposure derives from reported per-instrument source fill `start_position`; there is no verified source account equity or account PnL reconciliation. All allocations are whole-**observed**-book only.

@@ -203,6 +203,31 @@ def test_complete_hindsight_two_coin_follower_and_control_reconciled(tmp_path):
         assert "matched_long_only_market_control_pnl" in outcome
 
 
+def test_same_hypothetical_minute_actions_are_one_whole_book_rebalance(tmp_path):
+    """Do not overtrade the same 1m open or reuse its volume budget."""
+    _write_pair(
+        tmp_path,
+        "BTC",
+        [
+            _fill("BTC", 1, ORIGIN, 2, 1, "B"),
+            _fill("BTC", 3, ORIGIN + timedelta(hours=1, seconds=10), 3, 1, "B"),
+        ],
+    )
+    _write_pair(
+        tmp_path,
+        "ETH",
+        [
+            _fill("ETH", 2, ORIGIN + timedelta(minutes=1), -4, 1, "B"),
+            _fill("ETH", 4, ORIGIN + timedelta(hours=1, seconds=20), -3, 1, "B"),
+        ],
+    )
+    result = replay_wallet(tmp_path, _entry(), FixedMarket(), 5)
+    assert result["status"] == "HISTORICAL_HINDSIGHT_SIMULATION_ONLY"
+    # Two fills for the initial book, two for the combined later target.
+    assert result["hypothetical_fill_count"] == 4
+    assert result["processed_source_fills_after_anchor"] == 2
+
+
 def test_missing_hedge_market_blocks_entire_wallet_and_no_partial_pnl(tmp_path):
     _nonflat_two_coin_source(tmp_path)
     out = replay_wallet(

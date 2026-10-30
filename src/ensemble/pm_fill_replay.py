@@ -323,11 +323,8 @@ def replay_wallet(
             # Opaque coin with verified ZERO exposure can remain zero.
             instrument_names[coin] = None
 
-    def execute_snapshot(signal_time: datetime) -> dict | None:
+    def execute_snapshot(fill_time: datetime) -> dict | None:
         nonlocal last_clock, last_marks, executions
-        fill_time = VerifiedHyperliquidMinuteSource._minute(
-            signal_time + timedelta(minutes=latency)
-        )
         if fill_time > CUT:
             return {"status": "BLOCKED_EXECUTION_AFTER_CUTOFF", "at": fill_time.isoformat()}
         active: dict[str, Decimal] = {}
@@ -398,26 +395,24 @@ def replay_wallet(
                 "at": fill_time.isoformat(),
             }
 
-    # Source event order is position-linked for each coin within an exchange
-    # millisecond, then stable-merged over coins. Execute a single aggregate
-    # book decision per source millisecond, not one fill per micro-event.
-    outcome = execute_snapshot(anchor_at)
-    if outcome is not None:
-        return {**history, **outcome, "pnl": None}
-    from itertools import groupby
-
-    events = fills[warmup_rows:]
+    # Each fill is converted to its future executable minute. The same minute
+    # may contain several earlier source events, but only the latest *whole*
+    # book is executable at that open. One rebalance = one participation cap;
+    # never re-use the same realized minute volume for multiple virtual fills.
+    planned: dict[datetime, list[tuple]] = {
+        VerifiedHyperliquidMinuteSource._minute(anchor_at + timedelta(minutes=latency)): []
+    }
+    for row in fills[warmup_rows:]:
+        scheduled = VerifiedHyperliquidMinuteSource._minute(row[0] + timedelta(minutes=latency))
+        planned.setdefault(scheduled, []).append(row)
     events_processed = 0
-    for when, group in groupby(events, key=lambda e: e[0]):
-        grouped = tuple(group)
-        # A signal whose delayed next-minute open exceeds research cutoff
-        # must not be filled using future bar data.
-        if VerifiedHyperliquidMinuteSource._minute(when + timedelta(minutes=latency)) > CUT:
+    for fill_time, grouped in sorted(planned.items()):
+        # A source action cannot execute at a future bar beyond frozen cutoff.
+        if fill_time > CUT:
             right_censored += len(grouped)
             continue
-        for _, _, coin, before, after, _, _ in grouped:
-            previous = source_book[coin]
-            if not _same_position(previous, before):
+        for when, _, coin, before, after, _, _ in grouped:
+            if not _same_position(source_book[coin], before):
                 return {
                     **history,
                     "status": "BLOCKED_SOURCE_CONTINUITY",
@@ -429,7 +424,7 @@ def replay_wallet(
                 }
             source_book[coin] = after
             events_processed += 1
-        outcome = execute_snapshot(when)
+        outcome = execute_snapshot(fill_time)
         if outcome is not None:
             return {**history, **outcome, "processed_fills": events_processed, "pnl": None}
 
@@ -539,8 +534,20 @@ def run(
             rows.append(
                 replay_wallet(root, entry, source, lag, risk_budget=risk_budget, prepared=prepared)
             )
+    from .pm_fill_cards import build_fill_evidence_cards
+
+    evidence_cards = build_fill_evidence_cards(
+        entries,
+        rows,
+        risk_budget=str(risk_budget),
+        study_start=STUDY_START.isoformat(),
+        cutoff=CUT.isoformat(),
+    )
     return {
-        "schema": "pm01_fill_only_replay_v2",
+        "schema": "pm01_fill_only_replay_v3",
+        "whole_wallet_candidate_cards": evidence_cards["example_wallets"],
+        "wallet_evidence_cards": evidence_cards["cards"],
+        "prospective_qualified_wallet_count": evidence_cards["qualified_prospective_wallets"],
         "risk_budget_fraction_of_initial_capital": str(risk_budget),
         "source_normalized_fills_sha256": signature.hexdigest(),
         "study_start": STUDY_START.isoformat(),

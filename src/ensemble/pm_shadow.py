@@ -22,6 +22,7 @@ from .pm_portfolio import PortfolioDecision, _decimal
 ZERO = Decimal("0")
 TEN_K = Decimal("10000")
 SYMBOL = re.compile(r"^[A-Za-z0-9_.-]+$")
+SUPPORTED_HIP3_DEXES = frozenset({"xyz", "io", "para"})
 
 
 class MarketDataBlocked(Exception):
@@ -64,8 +65,10 @@ class VerifiedHyperliquidMinuteSource:
             raise MarketDataBlocked("UNSUPPORTED_MARKET_SYMBOL")
         if dex == "default":
             return Path("crypto_futures_ohlcv_1m_HYPERLIQUID_" + symbol + "_PERP")
-        if dex == "xyz":
-            return Path("crypto_futures_ohlcv_1m_HYPERLIQUID_XYZ_PERP") / ("symbol=" + symbol)
+        if dex in SUPPORTED_HIP3_DEXES:
+            return Path(f"crypto_futures_ohlcv_1m_HYPERLIQUID_{dex.upper()}_PERP") / (
+                "symbol=" + symbol
+            )
         raise MarketDataBlocked("UNSUPPORTED_HIP3_DEX")
 
     @staticmethod
@@ -105,8 +108,8 @@ class VerifiedHyperliquidMinuteSource:
             if source.get("exchange") not in {"hyperliquid_futures", "hyperliquid", "HYPERLIQUID"}:
                 raise MarketDataBlocked("WRONG_MARKET_VENUE")
             dex, expected_symbol = instrument.split(":")[3:5]
-            if dex == "xyz":
-                expected_symbol = "xyz:" + expected_symbol
+            if dex in SUPPORTED_HIP3_DEXES:
+                expected_symbol = dex + ":" + expected_symbol
             if source.get("source_symbol") != expected_symbol:
                 raise MarketDataBlocked("WRONG_MARKET_SYMBOL")
             expected = source.get("sha256")

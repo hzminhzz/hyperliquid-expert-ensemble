@@ -22,6 +22,23 @@ from .pm_sources import load_cohort
 from .pm_research import _write_private_evidence
 
 
+LATENCY_MINUTES = (5, 15, 60)
+
+
+def _audit_clocks(source_when: datetime, cutoff: datetime) -> tuple[datetime, ...]:
+    """Future executable minute opens that matured within frozen research."""
+    return tuple(
+        moment
+        for latency in LATENCY_MINUTES
+        if (
+            moment := VerifiedHyperliquidMinuteSource._minute(
+                source_when + timedelta(minutes=latency)
+            )
+        )
+        <= cutoff
+    )
+
+
 def _audit_partition(root: Path, instrument: str, when: datetime) -> str:
     """Verify original 1m day metadata and bytes without loading all bars."""
     try:
@@ -33,11 +50,26 @@ def _audit_partition(root: Path, instrument: str, when: datetime) -> str:
     data = path / "data.parquet"
     meta = path / "source.json"
     if not data.is_file() or not meta.is_file():
+        if meta.is_file():
+            try:
+                source = json.loads(meta.read_text(encoding="utf-8"))
+                dex, symbol = instrument.split(":")[3:5]
+                expected_symbol = dex + ":" + symbol if dex != "default" else symbol
+                if (
+                    source.get("status") == "no_source_data"
+                    and source.get("provider") == "CryptoHFTData"
+                    and source.get("exchange") == "hyperliquid_futures"
+                    and source.get("source_symbol") == expected_symbol
+                ):
+                    return "CHD_CONFIRMED_NO_TRADE_SOURCE"
+            except (OSError, ValueError, TypeError):  # fmt: skip
+                pass
+            return "INCOMPLETE_MARKET_DAY_SOURCE_PAIR"
         return "MISSING_NATIVE_MARKET_DAY"
     try:
         source = json.loads(meta.read_text(encoding="utf-8"))
         dex, symbol = instrument.split(":")[3:5]
-        expected_symbol = "xyz:" + symbol if dex == "xyz" else symbol
+        expected_symbol = dex + ":" + symbol if dex != "default" else symbol
         if source.get("exchange") != "hyperliquid_futures":
             return "WRONG_NATIVE_MARKET_VENUE"
         if source.get("source_symbol") != expected_symbol:
@@ -80,33 +112,36 @@ def inventory(research_root: Path, market_root: Path) -> dict:
         sample_count = 0
         missing_samples = Counter()
 
-        def sample_book(source_when: datetime):
+        def sample_book(source_when: datetime, *, terminal: bool = False):
             nonlocal sample_count
-            sample_count += 1
-            for coin, qty in state.items():
-                if qty == 0:
-                    continue
-                try:
-                    instrument = _market_instrument(coin)
-                    market_minute = VerifiedHyperliquidMinuteSource._minute(
-                        source_when + timedelta(minutes=5)
-                    )
-                    day = market_minute.date().isoformat()
-                    key = (instrument, day)
-                    if key not in per_day_cache:
-                        per_day_cache[key] = _audit_partition(
-                            market_root, instrument, market_minute
-                        )
-                    state_code = per_day_cache[key]
-                except MarketDataBlocked as exc:
-                    instrument = coin
-                    day = "UNKNOWN"
-                    state_code = str(exc)
-                required[(instrument, day, state_code)] += 1
-                counts[state_code] += 1
-                if state_code != "SOURCE_DAY_SHA_VERIFIED":
-                    missing_samples[(instrument, state_code)] += 1
-                    by_issue[(instrument, state_code)].add(entry.alias)
+            times = (
+                (CUT.replace(second=0, microsecond=0),)
+                if terminal
+                else _audit_clocks(source_when, CUT)
+            )
+            for market_minute in times:
+                sample_count += 1
+                for coin, qty in state.items():
+                    if qty == 0:
+                        continue
+                    try:
+                        instrument = _market_instrument(coin)
+                        day = market_minute.date().isoformat()
+                        key = (instrument, day)
+                        if key not in per_day_cache:
+                            per_day_cache[key] = _audit_partition(
+                                market_root, instrument, market_minute
+                            )
+                        state_code = per_day_cache[key]
+                    except MarketDataBlocked as exc:
+                        instrument = coin
+                        day = "UNKNOWN"
+                        state_code = str(exc)
+                    required[(instrument, day, state_code)] += 1
+                    counts[state_code] += 1
+                    if state_code != "SOURCE_DAY_SHA_VERIFIED":
+                        missing_samples[(instrument, state_code)] += 1
+                        by_issue[(instrument, state_code)].add(entry.alias)
 
         sample_book(when)
         continuity_after = 0
@@ -118,6 +153,9 @@ def inventory(research_root: Path, market_root: Path) -> dict:
                     continuity_after += 1
                 state[coin] = after
             sample_book(source_when)
+        # Open follower exposure requires an independently sourced terminal
+        # mark, even for inactive coins whose last fill was days earlier.
+        sample_book(CUT, terminal=True)
         summary.update(
             {
                 "status": "COVERAGE_AUDITED_NOT_ECONOMICALLY_QUALIFIED",
@@ -156,8 +194,8 @@ def inventory(research_root: Path, market_root: Path) -> dict:
             {
                 "instrument": instrument,
                 "provider_symbol": (
-                    "xyz:" + instrument.rsplit(":", 1)[-1]
-                    if ":xyz:" in instrument
+                    ":".join(instrument.split(":")[3:])
+                    if instrument.split(":")[3] != "default"
                     else instrument.rsplit(":", 1)[-1]
                 ),
                 "date_utc": day,
@@ -185,6 +223,9 @@ def inventory(research_root: Path, market_root: Path) -> dict:
                 break
     return {
         "schema": "pm01_native_1m_36_wallet_coverage_v1",
+        "latency_minutes_covered": list(LATENCY_MINUTES),
+        "terminal_position_mark_day_included": True,
+        "coverage_is_conservative_day_level_union_not_exact_execution": True,
         "local_unverified_tick_day_materialization_candidates": local_tick_candidates,
         "local_tick_candidate_count": len(local_tick_candidates),
         "acquisition_requests_are_not_provider_availability_claims": True,
