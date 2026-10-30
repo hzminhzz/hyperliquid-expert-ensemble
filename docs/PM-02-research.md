@@ -1,12 +1,14 @@
 # PM-02 — Research-only portfolio-manager governance (partial engineering)
 
-**Status:** NOT ACCEPTED / NOT SCIENTIFICALLY QUALIFIED. This is an initial implementation, not Issue #4 completion.
+**Status:** NOT ACCEPTED / NOT SCIENTIFICALLY QUALIFIED. Engineering is in progress on stacked draft PR #7. The hourly autonomous direct-implementation goal is documented in `docs/PM-02-goal.md`.
 
 ## Source seam
 
 `python -m ensemble.pm_manager --pm01 <sealed pm01_fill_only_replay_v2 JSON> --asof <ISO UTC timestamp> --out <private directory>`
 
-The CLI consumes a 36-wallet PM-01 historical fill-only replay. No Rust ledger,
+The CLI consumes a 36-wallet PM-01 historical fill-only replay. `--previous <immutable pm02-<sha>.json>` chains a later decision to the previous content-addressed report with monotonic as-of and immutable cohort/state checks. Input PM-01 filenames must match the raw artifact SHA. Outputs are O_EXCL, owner-only, content-addressed and fsynced. A content-addressed local file does **not** independently prove genuine forward receipt time.
+
+No Rust ledger,
 exchange API, trading key, broker service or production Telegram process is used.
 Output: private SHA-256-addressed JSON file with 36 aliases, retrospective
 hypothetical scenarios, verified prospective gate results, lifecycle proposals
@@ -27,16 +29,17 @@ and five empty-or-proposed research seats. No wallet addresses are serialized.
 
 ## Important unfinished requirements
 
-The proof-of-concept is **not** a validated portfolio allocator. The following
+The allocator now has synthetic-only behavioral coverage for strictly overlapping UTC dates, paired dependence and signed instrument exposures, clone and joint extreme-loss diagnostics, capped greedy marginal utility, risk reserves, and matched equal-risk and shrinkage-inverse-vol comparator curves. No actual wallet has the requisite prospective matched paths, so real dependence and these baselines remain UNKNOWN. The system is **not** a validated portfolio allocator. The following
 must be completed before Issue #4 can be accepted:
 
 1. Strict external prospective evidence ingestion and immutable append-only
    decision log with full SHA source lineage, conflicts, and retroactive revisions.
 2. Dependence statistics on synchronized exposures and correlated loss tails;
    exact independent sample definitions and multiplicity-family recording.
-3. True marginal portfolio utility and matched equal-risk/shrinkage comparisons
-   on identical as-of paths. Current ranking sorts conservative individual
-   lower bounds and is **not** a verified marginal portfolio optimizer.
+3. Validate the current conservative greedy marginal portfolio utility and
+   matched equal-risk/shrinkage comparisons on a trusted prospective path;
+   synthetic tests alone are insufficient. Add full uncertainty calibration,
+   multi-parameter pre-registration, and economically defensible R sizing.
 4. Complete lifecycle transitions including CORE/RETIRED, escalation,
    thresholds fixed in a decision-policy manifest before prospective collection.
 5. Account-level stress and correlated-tail sizing with explicit emergency cuts.
@@ -54,7 +57,7 @@ Synthetic tests do not prove actual wallet profitability.
 
 Running on PM-01 10%-gross overlay replay artifact
 `pm01-36-wallets-2827a5b74b52c7e24b30.json` produced
-`pm02-ea1a4e4968aaee1853c7c832af2befa657196481603a68e1f4544bd761115bf9.json`:
+`pm02-f3df08b95921c3a1ed5eea4a1e71b82efb375d60850873a652b8c52d0f9bb713.json` after introducing source SHA checks and decision-chain metadata:
 36 cards; qualified 0; five EMPTY seats, 0 R. Independence and cloning are
 **UNKNOWN**, not evidence of 36 independent trading pods.
 
