@@ -264,14 +264,20 @@ def freeze(
     holdout_start: datetime = PRIMARY_START, holdout_end: datetime = PRIMARY_END,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    frozen_at = now or datetime.now(UTC)
-    if frozen_at.tzinfo is None or frozen_at >= holdout_start:
-        raise ValueError("future holdout must not have begun")
     source_release = json.loads(release_manifest.read_text())
     if source_release.get("schema") != "copytrade-pinned-release-v1":
         raise RuntimeError("unverified production release provenance")
     research_sha = _git_head(ensemble_repo)
-    ledger_id, seq, wallets = fresh_universe(ledger_db, cut=frozen_at)
+    # Resolve identity, then capture the shadow cursor BEFORE the final ledger
+    # sequence. Otherwise an actively moving collector may outrun an earlier
+    # source meta read, producing an impossible source-cut < shadow-cut.
+    with closing(sqlite3.connect(
+        f"file:{ledger_db}?mode=ro", uri=True, timeout=20,
+    )) as db:
+        source = db.execute("SELECT ledger_id FROM ledger_meta LIMIT 1").fetchone()
+        if source is None:
+            raise RuntimeError("source ledger not initialized")
+        ledger_id = str(source[0])
     with closing(sqlite3.connect(
         f"file:{journal_db}?mode=ro", uri=True, timeout=20,
     )) as db:
@@ -282,6 +288,14 @@ def freeze(
         if row is None:
             raise RuntimeError("prospective journal not initialized")
         shadow_seq = int(row[0])
+    frozen_at = now or datetime.now(UTC)
+    if frozen_at.tzinfo is None or frozen_at >= holdout_start:
+        raise ValueError("future holdout must not have begun")
+    actual_ledger_id, seq, wallets = fresh_universe(ledger_db, cut=frozen_at)
+    if actual_ledger_id != ledger_id:
+        raise RuntimeError("source ledger changed during preregistration")
+    if shadow_seq > seq:
+        raise RuntimeError("journal cursor outran current source cut; retry after reconciliation")
     roster = {
         "schema": "wp3-private-wallet-universe-v1",
         "source_ledger": ledger_id,

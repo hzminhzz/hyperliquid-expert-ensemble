@@ -144,6 +144,21 @@ def test_frozen_roster_excludes_stale_and_writes_private_once(tmp_path,monkeypat
     assert json.loads((root/"protocol.json").read_text())==frozen
 
 
+def test_concurrent_source_lag_refuses_incoherent_freeze(tmp_path,monkeypatch):
+    ledger,journal,release,history=_sources(tmp_path)
+    monkeypatch.setattr("ensemble.copy_preregister._git_head",lambda repo:CODE_SHA)
+    with closing(sqlite3.connect(journal)) as db,db:
+        db.execute("UPDATE opportunity_state SET last_seq=46")
+    dest=tmp_path/"incoherent"
+    with pytest.raises(RuntimeError,match="journal cursor outran"):
+        freeze(
+            ensemble_repo=tmp_path,ledger_db=ledger,journal_db=journal,
+            release_manifest=release,historical_report=history,
+            destination=dest,now=NOW,
+        )
+    assert not dest.exists()
+
+
 def test_freeze_rejects_starting_holdout_without_writing(tmp_path,monkeypatch):
     ledger,journal,release,history=_sources(tmp_path)
     monkeypatch.setattr("ensemble.copy_preregister._git_head",lambda repo:CODE_SHA)
