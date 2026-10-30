@@ -51,6 +51,17 @@ def test_future_holdout_and_deterministic_id() -> None:
     assert protocol["success_rule"]["promotion"]=="BLOCKED_UNTIL_NEW_HUMAN_APPROVAL"
 
 
+def test_real_git_sha1_commit_ids_are_accepted_with_sha256_artifact_hashes() -> None:
+    actual=payload(
+        research_code_sha="a" * 40,
+        source_release_ensemble_sha="b" * 40,
+        source_release_tracker_sha="c" * 40,
+    )
+    assert actual.payload()["source_cut"]["tracker_release_commit"]=="c" * 40
+    with pytest.raises(ValueError,match="Git provenance"):
+        payload(research_code_sha="a" * 39)
+
+
 def test_protocol_refuses_expired_holdout_or_unproven_source_cut() -> None:
     with pytest.raises(ValueError,match="freeze"):
         payload(frozen_at=START)

@@ -78,13 +78,19 @@ class ForwardProtocol:
             raise ValueError("insufficient frozen wallet universe or source evidence")
         if self.opportunity_cursor_cut > self.ledger_seq_cut:
             raise ValueError("prospective cursor exceeds source cut")
+        # Git deployment identifiers are 40-character SHA-1 commit IDs today;
+        # content-addressed roster/report artifacts use 64-character SHA-256.
         for identity in (
             self.research_code_sha, self.source_release_ensemble_sha,
-            self.source_release_tracker_sha, self.universe_sha256,
-            self.historical_report_sha256,
+            self.source_release_tracker_sha,
         ):
+            if len(identity) not in (40, 64) or not all(
+                c in "0123456789abcdef" for c in identity
+            ):
+                raise ValueError("invalid Git provenance hash")
+        for identity in (self.universe_sha256, self.historical_report_sha256):
             if len(identity) != 64 or not all(c in "0123456789abcdef" for c in identity):
-                raise ValueError("invalid provenance hash")
+                raise ValueError("invalid SHA-256 content hash")
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -111,9 +117,9 @@ class ForwardProtocol:
                 "universe_wallets": self.universe_wallet_count,
                 "universe_sha256": self.universe_sha256,
                 "historical_attribution_sha256": self.historical_report_sha256,
-                "research_code_sha256": self.research_code_sha,
-                "collector_release_ensemble_sha256": self.source_release_ensemble_sha,
-                "tracker_release_sha256": self.source_release_tracker_sha,
+                "research_code_commit": self.research_code_sha,
+                "collector_release_ensemble_commit": self.source_release_ensemble_sha,
+                "tracker_release_commit": self.source_release_tracker_sha,
             },
             "population": {
                 "design": "ALL_FRESH_VALIDATED_OBSERVER_WALLETS_AS_KNOWN_AT_FREEZE",
