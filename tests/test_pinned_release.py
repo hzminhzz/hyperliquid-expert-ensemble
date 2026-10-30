@@ -77,6 +77,19 @@ def test_forward_evaluator_and_assessment_timers_are_installed_and_enabled():
     assert len(TIMERS)==5
 
 
+def test_only_post_holdout_assessment_can_replay_missed_calendar_tick():
+    templates=Path(__file__).resolve().parents[1] / "deploy" / "systemd"
+    assert "Persistent=true" in (
+        templates / "copytrade-forward-assess.timer"
+    ).read_text()
+    assert "Persistent=false" in (
+        templates / "copytrade-flow-digest.timer"
+    ).read_text()
+    assert "Persistent=false" in (
+        templates / "copytrade-forward-evaluate.timer"
+    ).read_text()
+
+
 def test_private_env_is_not_overwritten_with_changed_contents(tmp_path):
     source = tmp_path / "source.env"
     target = tmp_path / "external" / "target.env"
