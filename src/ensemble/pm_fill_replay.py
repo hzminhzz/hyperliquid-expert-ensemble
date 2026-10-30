@@ -23,10 +23,20 @@ from .pm_research import _write_private_evidence
 
 ZERO = Decimal(0)
 CUT = datetime(2026, 10, 29, 17, 22, 16, 142000, tzinfo=UTC)
+STUDY_START = datetime(2026, 5, 29, 17, 22, 16, 142000, tzinfo=UTC)
+W019_LIT_GENERATION = (
+    "slow_pod_data_v1/wave_b_five_month_v1/w019_lit_new_generation/"
+    "generation-20261030T120153628646Z-1551b1a"
+)
 
 
 def _read_pair(root: Path, alias: str, address: str, coin: str, page_limit: int = 150):
-    path = root / "slow_pod_data_v1/hyperx_fills_cache_v1/pages" / alias / quote(coin, safe="")
+    if alias == "W019" and coin == "LIT":
+        # Separately verified fresh vendor generation. The old main-cache
+        # pagination ends too late for this five-month study.
+        path = root / W019_LIT_GENERATION
+    else:
+        path = root / "slow_pod_data_v1/hyperx_fills_cache_v1/pages" / alias / quote(coin, safe="")
     all_fills = []
     seen = set()
     complete = False
@@ -41,6 +51,12 @@ def _read_pair(root: Path, alias: str, address: str, coin: str, page_limit: int 
         meta = json.loads(meta_path.read_text())
         if sha256(raw).hexdigest() != meta.get("sha256"):
             raise ValueError("immutable page SHA mismatch")
+        if (
+            meta.get("alias", meta.get("wallet_alias")) != alias
+            or meta.get("coin") != coin
+            or meta.get("page") != page
+        ):
+            raise ValueError("source page sidecar identity mismatch")
         document = json.loads(raw)
         if document.get("page") != page or document.get("page_size") != 2000:
             raise ValueError("source page index mismatch")
@@ -58,7 +74,13 @@ def _read_pair(root: Path, alias: str, address: str, coin: str, page_limit: int 
                 size = Decimal(str(f["sz"]))
                 start = Decimal(str(f["start_position"]))
                 price = Decimal(str(f["px"]))
-                if size <= ZERO or price <= ZERO:
+                if (
+                    not size.is_finite()
+                    or not start.is_finite()
+                    or not price.is_finite()
+                    or size <= ZERO
+                    or (price <= ZERO and not coin.startswith("#"))
+                ):
                     raise ValueError("invalid source fill")
                 delta = size if side == "B" else -size
                 all_fills.append(
@@ -76,7 +98,11 @@ def _read_pair(root: Path, alias: str, address: str, coin: str, page_limit: int 
         if complete:
             break
     if not complete:
-        raise ValueError("source pagination not exhausted")
+        # Vendor older pages may be unavailable without affecting a study
+        # whose oldest cached immutable page predates the research window.
+        # Such a source is WINDOW-COVERED, never ALL-TIME-COMPLETE.
+        if not all_fills or min(x[0] for x in all_fills) > STUDY_START:
+            raise ValueError("source pagination does not reach study start")
     return all_fills
 
 
@@ -87,7 +113,7 @@ def _source_fills(root: Path, alias: str, address: str, coins: list[str]):
         try:
             events.extend(_read_pair(root, alias, address, coin))
         except (ValueError, OSError, KeyError, TypeError) as ex:
-            blockers.append(f"{coin}:{type(ex).__name__}")
+            blockers.append(f"{coin}:{type(ex).__name__}:{str(ex)}")
     # Same-ms order is not always TID order. Reject ambiguous continuity.
     by_coin = defaultdict(list)
     for e in events:
@@ -123,7 +149,10 @@ def _source_fills(root: Path, alias: str, address: str, coins: list[str]):
                     blockers.append(f"{coin}:POSITION_DISCONTINUITY")
                 prev = pick[4]
                 results.append(pick)
-    results.sort(key=lambda x: (x[0], x[1]))
+    # Crucial: global TID order is NOT the execution sequence for fills
+    # sharing an exchange millisecond. Stable-merge instrument-local linked
+    # chains by event time only; sorting by TID here destroys continuity.
+    results.sort(key=lambda x: x[0])
     return results, sorted(set(blockers))
 
 
@@ -142,6 +171,58 @@ def _coins(root: Path, alias: str):
     return sorted(found)
 
 
+def _same_position(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= Decimal("0.0000001") * max(Decimal(1), abs(a), abs(b))
+
+
+def _asof_full_book_anchor(fills: list, coins: list[str]):
+    """Initialize only from each coin's actual reported before/after.
+
+    No zero inventory is invented. Require a first observation for every
+    vendor-listed instrument, then start at the five-month study boundary or
+    after the final first-seen instrument, whichever occurs later. Earlier
+    gaps are exposed but not backdated into the as-of reconstructed book.
+    """
+    from itertools import groupby
+
+    state: dict[str, Decimal] = {}
+    first_nonflat: set[str] = set()
+    before_anchor_gaps = 0
+    warmup_rows = 0
+    for when, group_iter in groupby(fills, lambda e: e[0]):
+        if when > STUDY_START and len(state) == len(coins):
+            return STUDY_START, dict(state), warmup_rows, before_anchor_gaps, len(first_nonflat)
+        for event in group_iter:
+            coin, before, after = event[2], event[3], event[4]
+            if coin not in state:
+                state[coin] = before
+                if before != ZERO:
+                    first_nonflat.add(coin)
+            elif not _same_position(state[coin], before):
+                # Source later authoritatively reports a new before+after;
+                # the earlier episode cannot support returns, so warm it up.
+                before_anchor_gaps += 1
+                state[coin] = before
+            state[coin] = after
+            warmup_rows += 1
+        if when >= STUDY_START and len(state) == len(coins):
+            return when, dict(state), warmup_rows, before_anchor_gaps, len(first_nonflat)
+    if len(state) == len(coins):
+        return STUDY_START, dict(state), warmup_rows, before_anchor_gaps, len(first_nonflat)
+    return None
+
+
+def _market_instrument(coin: str) -> str:
+    if coin.startswith("#"):
+        raise MarketDataBlocked("UNRESOLVED_OPAQUE_HYPERLIQUID_COIN")
+    if ":" not in coin:
+        return "hyperliquid:mainnet:perp:default:" + coin
+    dex, symbol = coin.split(":", 1)
+    if not dex or not symbol or ":" in symbol:
+        raise MarketDataBlocked("UNSUPPORTED_MARKET_NAMESPACE")
+    return "hyperliquid:mainnet:perp:" + dex + ":" + symbol
+
+
 def replay_wallet(
     root: Path,
     entry,
@@ -149,139 +230,279 @@ def replay_wallet(
     latency: int,
     capital: Decimal = Decimal("100000"),
     risk_budget: Decimal = Decimal("0.10"),
+    *,
+    prepared: tuple[list, list[str], list[str]] | None = None,
 ):
-    coins = _coins(root, entry.alias)
-    fills, issues = _source_fills(root, entry.alias, entry.address, coins)
+    """Historical-oracle, complete vendor-listed-book replay, never broker PnL.
+
+    Source fills are reconstructed once and reused across latency scenarios.
+    The full observed position book is cold-started from direct fill-reported
+    before/after fields *only after every listed instrument has appeared*.
+    Original exchange time does not establish historical follower availability.
+    """
+    if prepared is None:
+        coins = _coins(root, entry.alias)
+        fills, issues = _source_fills(root, entry.alias, entry.address, coins)
+    else:
+        fills, issues, coins = prepared
     history = {
         "wallet": entry.alias,
         "cohort": entry.cohort,
         "instruments": len(coins),
         "source_fills": len(fills),
-        "known_at": "UNAVAILABLE_VENDOR_HISTORICAL",
+        "known_at": "UNKNOWN_VENDOR_HISTORICAL_ORACLE",
         "latency_minutes": latency,
-        "scope": "VENDOR_REPORTED_INSTRUMENTS_ONLY",
+        "scope": "FROZEN_VENDOR_REPORTED_INSTRUMENTS_ONLY_NOT_TOTAL_EXCHANGE_ACCOUNT",
         "oracle_hindsight": True,
         "blocked_reasons": issues,
+        "follower_actual_fills": 0,
     }
-    if not fills or issues:
+    # Genuine missing source pages / wrong wallet / invalid quantity cannot
+    # be solved by a subsequent price bar. Earlier position-chain breaks can
+    # be warm-up censored if a later all-instrument anchor is observed.
+    fatal = [reason for reason in issues if not reason.endswith(":POSITION_DISCONTINUITY")]
+    if not fills or fatal:
         return {**history, "status": "BLOCKED_SOURCE_INCOMPLETE", "pnl": None}
-    # A vendor-listed instrument may be left-censored. Reconstruct its
-    # signed quantity from the first observed start_position and only begin
-    # the follower after *every listed instrument* has been observed flat
-    # simultaneously. This excludes the unknown prehistory without
-    # pretending the source started with zero positions.
-    first = {}
-    for event in fills:
-        first.setdefault(event[2], event[3])
-    seed = dict(first)
-    trusted_start = None
-    for ix, event in enumerate(fills):
-        coin, before, after = event[2], event[3], event[4]
-        if abs(seed[coin] - before) > Decimal("0.0000001") * max(Decimal(1), abs(before)):
-            return {**history, "status": "BLOCKED_SOURCE_CONTINUITY", "pnl": None}
-        seed[coin] = after
-        if all(q == ZERO for q in seed.values()):
-            trusted_start = ix + 1
-            break
-    if trusted_start is None or trusted_start >= len(fills):
-        return {
-            **history,
-            "status": "BLOCKED_NO_OBSERVED_FLAT_RESET",
-            "pnl": None,
-            "nonflat_initial_instruments": sum(v != ZERO for v in first.values()),
+    anchor = _asof_full_book_anchor(fills, coins)
+    if anchor is None:
+        return {**history, "status": "BLOCKED_SOURCE_ANCHOR_UNAVAILABLE", "pnl": None}
+    anchor_at, source_book, warmup_rows, gaps_before_anchor, left_censored_coins = anchor
+    history.update(
+        {
+            "source_anchored_at": anchor_at.isoformat(),
+            "source_warmup_fills_excluded": warmup_rows,
+            "gaps_in_censored_warmup": gaps_before_anchor,
+            "nonzero_first_observed_instruments": left_censored_coins,
+            "replay_window_hours": round((CUT - anchor_at).total_seconds() / 3600, 3),
+            "start_method": "PER_INSTRUMENT_FILL_REPORTED_INVENTORY_HINDSIGHT",
         }
-    history["warmup_fills_excluded"] = trusted_start
-    book = _VirtualBook()
-    control = _VirtualBook()
-    source_book = {coin: ZERO for coin in coins}
-    last_time = None
-    last_marks = {}
-    first_timestamp = fills[trusted_start][0]
-    model = Scenario("HYPERX_HISTORICAL_FILL_ORACLE", latency, capital, risk_budget)
-    for when, tid, coin, before, after, delta, source_px in fills[trusted_start:]:
-        if source_book[coin] != before:
-            return {**history, "status": "BLOCKED_SOURCE_CONTINUITY", "pnl": None}
-        source_book[coin] = after
-        action_at = when + timedelta(minutes=latency)
-        if action_at > CUT:
-            return {**history, "status": "BLOCKED_POST_CUTOFF_ACTION", "pnl": None}
-        # Price and liquidity checks across every open leg at every action.
-        instrument_names = {
-            c: (
-                "hyperliquid:mainnet:perp:default:" + c
-                if ":" not in c and not c.startswith("#")
-                else "hyperliquid:mainnet:perp:" + c
-            )
-            for c in coins
-        }
-        active = {instrument_names[c]: q for c, q in source_book.items() if q != ZERO}
-        needed = sorted(set(active) | set(book.positions) | set(control.positions))
+    )
+    # The source's complete vendor roster is hindsight-selected. Do not
+    # reinterpret this economic simulation as a genuine as-known forward test.
+    if anchor_at + timedelta(minutes=latency + 1) > CUT:
+        return {**history, "status": "BLOCKED_NO_MATURE_FOLLOWER_WINDOW", "pnl": None}
+
+    model = Scenario(
+        "FILL_HISTORY_ORACLE",
+        latency,
+        capital,
+        risk_budget,
+    )
+    follower = _VirtualBook()
+    baseline = _VirtualBook()
+    last_clock = None
+    last_marks: dict[str, Decimal] = {}
+    executions = 0
+    right_censored = 0
+    draws = [capital]
+    instrument_names = {}
+    for coin in coins:
         try:
-            quotes = {name: source.get(name, action_at) for name in needed}
-            marks = {name: v.open for name, v in quotes.items()}
-            # A *whole-book* gross risk normalization; no per-leg independent
-            # sizing, and no source account equity hallucinated.
-            gross = sum((abs(q * marks[name]) for name, q in active.items()), ZERO)
-            scale = model.initial_cash * model.portfolio_multiplier / gross if gross else ZERO
-            target = {name: q * scale for name, q in active.items()}
-            long_control = {name: abs(q) for name, q in target.items()}
-            if last_time is not None:
-                elapsed = source._minute(action_at) - last_time
-                if elapsed < timedelta():
-                    raise ValueError("nonmonotonic follower event")
-                book.accrue_funding(marks, elapsed, model)
-                control.accrue_funding(marks, elapsed, model)
-            for b, tgt in ((book, target), (control, long_control)):
+            instrument_names[coin] = _market_instrument(coin)
+        except MarketDataBlocked:
+            # Opaque coin with verified ZERO exposure can remain zero.
+            instrument_names[coin] = None
+
+    def execute_snapshot(signal_time: datetime) -> dict | None:
+        nonlocal last_clock, last_marks, executions
+        fill_time = VerifiedHyperliquidMinuteSource._minute(
+            signal_time + timedelta(minutes=latency)
+        )
+        if fill_time > CUT:
+            return {"status": "BLOCKED_EXECUTION_AFTER_CUTOFF", "at": fill_time.isoformat()}
+        active: dict[str, Decimal] = {}
+        for coin, qty in source_book.items():
+            if qty == ZERO:
+                continue
+            name = instrument_names[coin]
+            if name is None:
+                return {
+                    "status": "BLOCKED_MARKET_OR_EXECUTION",
+                    "reason": "UNRESOLVED_OPAQUE_HYPERLIQUID_COIN",
+                    "instrument": coin,
+                    "at": fill_time.isoformat(),
+                }
+            active[name] = qty
+        needed = sorted(set(active) | set(follower.positions) | set(baseline.positions))
+        quotes = {}
+        try:
+            for name in needed:
+                try:
+                    quotes[name] = source.get(name, fill_time)
+                except MarketDataBlocked as exc:
+                    return {
+                        "status": "BLOCKED_MARKET_OR_EXECUTION",
+                        "reason": str(exc),
+                        "instrument": name,
+                        "at": fill_time.isoformat(),
+                    }
+            marks = {name: q.open for name, q in quotes.items()}
+            gross = sum((abs(qty * marks[name]) for name, qty in active.items()), ZERO)
+            scalar = model.initial_cash * model.portfolio_multiplier / gross if gross else ZERO
+            desired = {name: qty * scalar for name, qty in active.items()}
+            matched_long = {name: abs(qty) for name, qty in desired.items()}
+            for book, target in ((follower, desired), (baseline, matched_long)):
                 for name in needed:
-                    d = tgt.get(name, ZERO) - b.positions.get(name, ZERO)
-                    if d and (
-                        quotes[name].quote_volume <= ZERO
-                        or abs(d * marks[name])
-                        > quotes[name].quote_volume * model.max_minute_participation
-                    ):
-                        raise MarketDataBlocked("VOLUME_PARTICIPATION_LIMIT")
-            book.rebalance(target, quotes, model)
-            control.rebalance(long_control, quotes, model)
-            last_time = source._minute(action_at)
+                    delta = target.get(name, ZERO) - book.positions.get(name, ZERO)
+                    if delta != ZERO:
+                        if (
+                            quotes[name].quote_volume <= ZERO
+                            or abs(delta * marks[name])
+                            > quotes[name].quote_volume * model.max_minute_participation
+                        ):
+                            return {
+                                "status": "BLOCKED_MARKET_OR_EXECUTION",
+                                "reason": "MINUTE_PARTICIPATION_EXCEEDED",
+                                "instrument": name,
+                                "at": fill_time.isoformat(),
+                            }
+            if last_clock is not None:
+                elapsed = fill_time - last_clock
+                if elapsed < timedelta():
+                    raise ValueError("nonmonotonic follower decisions")
+                follower.accrue_funding(marks, elapsed, model)
+                baseline.accrue_funding(marks, elapsed, model)
+            previous = follower.fills
+            follower.rebalance(desired, quotes, model)
+            baseline.rebalance(matched_long, quotes, model)
+            executions += follower.fills - previous
+            last_clock = fill_time
             last_marks = marks
-        except (MarketDataBlocked, ValueError) as exc:
+            equity = capital + sum(follower.pnl_by_instrument(marks).values(), ZERO)
+            draws.append(equity)
+            return None
+        except MarketDataBlocked as exc:
             return {
-                **history,
                 "status": "BLOCKED_MARKET_OR_EXECUTION",
                 "reason": str(exc),
-                "pnl": None,
+                "at": fill_time.isoformat(),
             }
-    attributed = book.pnl_by_instrument(last_marks)
+
+    # Source event order is position-linked for each coin within an exchange
+    # millisecond, then stable-merged over coins. Execute a single aggregate
+    # book decision per source millisecond, not one fill per micro-event.
+    outcome = execute_snapshot(anchor_at)
+    if outcome is not None:
+        return {**history, **outcome, "pnl": None}
+    from itertools import groupby
+
+    events = fills[warmup_rows:]
+    events_processed = 0
+    for when, group in groupby(events, key=lambda e: e[0]):
+        grouped = tuple(group)
+        # A signal whose delayed next-minute open exceeds research cutoff
+        # must not be filled using future bar data.
+        if VerifiedHyperliquidMinuteSource._minute(when + timedelta(minutes=latency)) > CUT:
+            right_censored += len(grouped)
+            continue
+        for _, _, coin, before, after, _, _ in grouped:
+            previous = source_book[coin]
+            if not _same_position(previous, before):
+                return {
+                    **history,
+                    "status": "BLOCKED_SOURCE_CONTINUITY",
+                    "reason": "POST_ANCHOR_POSITION_CHAIN_BREAK",
+                    "instrument": coin,
+                    "at": when.isoformat(),
+                    "processed_fills": events_processed,
+                    "pnl": None,
+                }
+            source_book[coin] = after
+            events_processed += 1
+        outcome = execute_snapshot(when)
+        if outcome is not None:
+            return {**history, **outcome, "processed_fills": events_processed, "pnl": None}
+
+    # Independent terminal mark at a bar-open strictly no later than the
+    # cutoff; no exit trades are fabricated for still-open positions.
+    terminal_at = CUT.replace(second=0, microsecond=0)
+    final_names = sorted(
+        name
+        for name in set(follower.positions) | set(baseline.positions)
+        if follower.positions.get(name, ZERO) != ZERO or baseline.positions.get(name, ZERO) != ZERO
+    )
+    try:
+        terminal = {}
+        for name in final_names:
+            try:
+                terminal[name] = source.get(name, terminal_at).open
+            except MarketDataBlocked as exc:
+                return {
+                    **history,
+                    "status": "BLOCKED_TERMINAL_MARK",
+                    "reason": str(exc),
+                    "instrument": name,
+                    "at": terminal_at.isoformat(),
+                    "pnl": None,
+                }
+        if last_clock is not None and terminal_at > last_clock:
+            elapsed = terminal_at - last_clock
+            follower.accrue_funding(terminal, elapsed, model)
+            baseline.accrue_funding(terminal, elapsed, model)
+    except MarketDataBlocked as exc:
+        return {**history, "status": "BLOCKED_TERMINAL_MARK", "reason": str(exc), "pnl": None}
+    attributed = follower.pnl_by_instrument(terminal)
     pnl = sum(attributed.values(), ZERO)
-    marked = sum((q * last_marks[name] for name, q in book.positions.items()), ZERO)
-    cash = capital + sum(book.flows.values(), ZERO)
-    if cash + marked - capital != pnl:
-        raise AssertionError("follower balance does not reconcile")
+    cash = capital + sum(follower.flows.values(), ZERO)
+    marked = sum((qty * terminal[name] for name, qty in follower.positions.items()), ZERO)
+    if abs(cash + marked - capital - pnl) > Decimal("0.00000001"):
+        raise AssertionError("independent cash/MTM attribution mismatch")
+    draws.append(capital + pnl)
+    running_peak = draws[0]
+    max_drawdown = ZERO
+    for equity in draws:
+        running_peak = max(running_peak, equity)
+        max_drawdown = max(max_drawdown, (running_peak - equity) / running_peak)
     return {
         **history,
         "status": "HISTORICAL_HINDSIGHT_SIMULATION_ONLY",
         "pnl": str(pnl),
         "return_on_initial_capital": str(pnl / capital),
-        "always_long_control_pnl": str(sum(control.pnl_by_instrument(last_marks).values(), ZERO)),
-        "fees": str(book.fees),
-        "funding_assumed": str(book.funding),
-        "turnover": str(book.turnover),
-        "fill_count": book.fills,
-        "open_positions": sum(bool(q) for q in book.positions.values()),
-        "first_event": first_timestamp.isoformat(),
-        "last_event": fills[-1][0].isoformat(),
+        "matched_long_only_market_control_pnl": str(
+            sum(baseline.pnl_by_instrument(terminal).values(), ZERO)
+        ),
+        "incremental_vs_matched_long_control": str(
+            pnl - sum(baseline.pnl_by_instrument(terminal).values(), ZERO)
+        ),
+        "fees": str(follower.fees),
+        "funding_assumed": str(follower.funding),
+        "spread_slippage": str(follower.impact),
+        "turnover": str(follower.turnover),
+        "hypothetical_fill_count": executions,
+        "processed_source_fills_after_anchor": events_processed,
+        "right_censored_source_fills": right_censored,
+        "open_positions": sum(q != ZERO for q in follower.positions.values()),
+        "max_drawdown_sampled_at_actions": str(max_drawdown),
+        "terminal_mark_at": terminal_at.isoformat(),
+        "source_end_at": fills[-1][0].isoformat(),
+        "actual_follower_fills": None,
+        "source_equity_accounting_reconciled": False,
     }
 
 
-def run(root: Path, market_root: Path):
+def run(root: Path, market_root: Path, risk_budget: Decimal = Decimal("0.10")):
+    if not risk_budget.is_finite() or risk_budget <= ZERO or risk_budget > Decimal(1):
+        raise ValueError("invalid hypothetical gross notional budget")
     entries, fingerprints = load_cohort(root)
     source = VerifiedHyperliquidMinuteSource(market_root)
     rows = []
+    signature = sha256()
     for entry in entries:
+        coins = _coins(root, entry.alias)
+        fills, issues = _source_fills(root, entry.alias, entry.address, coins)
+        for fill in fills:
+            signature.update((json.dumps([str(v) for v in fill]) + "\\n").encode())
+        prepared = (fills, issues, coins)
         for lag in (5, 15, 60):
-            rows.append(replay_wallet(root, entry, source, lag))
+            rows.append(
+                replay_wallet(root, entry, source, lag, risk_budget=risk_budget, prepared=prepared)
+            )
     return {
-        "schema": "pm01_fill_only_replay_v1",
+        "schema": "pm01_fill_only_replay_v2",
+        "risk_budget_fraction_of_initial_capital": str(risk_budget),
+        "source_normalized_fills_sha256": signature.hexdigest(),
+        "study_start": STUDY_START.isoformat(),
+        "study_cutoff": CUT.isoformat(),
         "wallet_count": len(entries),
         "source_contract_shas": fingerprints,
         "model": "historical-fill-oracle, not prospective known-at",
@@ -298,14 +519,16 @@ def main():
     p.add_argument("--research-root", type=Path, required=True)
     p.add_argument("--market-root", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--risk-budget", default="0.10", type=Decimal)
     args = p.parse_args()
-    evidence = run(args.research_root, args.market_root)
+    evidence = run(args.research_root, args.market_root, args.risk_budget)
     file, digest = _write_private_evidence(args.out, evidence)
     counts = Counter(x["status"] for x in evidence["rows"])
     print(
         json.dumps(
             {
                 "wallets": evidence["wallet_count"],
+                "risk_budget": evidence["risk_budget_fraction_of_initial_capital"],
                 "scenarios": dict(counts),
                 "sha256": digest,
                 "file": str(file),

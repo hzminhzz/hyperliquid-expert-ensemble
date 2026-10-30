@@ -21,7 +21,7 @@ from .pm_portfolio import PortfolioDecision, _decimal
 
 ZERO = Decimal("0")
 TEN_K = Decimal("10000")
-SYMBOL = re.compile(r"^[A-Z0-9_.-]+$")
+SYMBOL = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class MarketDataBlocked(Exception):
@@ -43,9 +43,9 @@ class MarketSource(Protocol):
 class VerifiedHyperliquidMinuteSource:
     """Read-only, lazy per-day CryptoHFTData Hyperliquid 1m OHLCV adapter.
 
-    Validates every consumed Parquet day against its source.json SHA. In
-    particular refuses the unresolved xyz:SP500 / xyz:XYZ100 live-lake SHA
-    mismatch instead of falling back to Binance or an earlier mutable panel.
+    Validates every consumed Parquet day against its source.json SHA.
+    Rejects Parquet/sidecar mismatches, including prior HIP-3 index defects;
+    never falls back to Binance or unrelated instrument histories.
     """
 
     def __init__(self, root: Path):
@@ -104,7 +104,9 @@ class VerifiedHyperliquidMinuteSource:
             source = json.loads(meta.read_text(encoding="utf-8"))
             if source.get("exchange") not in {"hyperliquid_futures", "hyperliquid", "HYPERLIQUID"}:
                 raise MarketDataBlocked("WRONG_MARKET_VENUE")
-            expected_symbol = instrument.rsplit(":", 1)[-1]
+            dex, expected_symbol = instrument.split(":")[3:5]
+            if dex == "xyz":
+                expected_symbol = "xyz:" + expected_symbol
             if source.get("source_symbol") != expected_symbol:
                 raise MarketDataBlocked("WRONG_MARKET_SYMBOL")
             expected = source.get("sha256")
@@ -116,34 +118,51 @@ class VerifiedHyperliquidMinuteSource:
             import polars as pl
 
             columns = pl.scan_parquet(path).collect_schema()
-            if "quote_volume" in columns:
-                liquidity = "quote_volume"
-            elif "volume" in columns:
-                # Source volume is base quantity; this is a conservative
-                # open-price notional PROXY, not observed order-book liquidity.
-                liquidity = "volume"
+            required = {"timestamp", "symbol", "open", "high", "low", "close", "volume"}
+            if not required.issubset(columns):
+                raise MarketDataBlocked("MISSING_NATIVE_1M_OHLCV_COLUMNS")
+            if source.get("source_type") not in {"trades", "candles"}:
+                raise MarketDataBlocked("UNVERIFIED_NATIVE_1M_SOURCE_TYPE")
+            has_quote = "quote_volume" in columns
+            if not has_quote:
+                # No order-book liquidity is inferred from market bar volume.
                 self.liquidity_proxy_days.add(instrument + "@" + day)
-            else:
-                raise MarketDataBlocked("NO_MARKET_LIQUIDITY_VOLUME")
-            frame = pl.read_parquet(path, columns=["timestamp", "open", liquidity])
+            keys = sorted(required | ({"quote_volume"} if has_quote else set()))
+            frame = pl.read_parquet(path, columns=keys)
             rows: dict[datetime, MinuteBar] = {}
             for row in frame.iter_rows(named=True):
                 ts = row["timestamp"]
-                if ts.tzinfo is None or ts.date().isoformat() != day or ts in rows:
+                if (
+                    ts.tzinfo is None
+                    or ts.date().isoformat() != day
+                    or ts.second != 0
+                    or ts.microsecond != 0
+                    or ts in rows
+                ):
                     raise MarketDataBlocked("DUPLICATE_OR_MALFORMED_1M_BARS")
-                bar = MinuteBar(
-                    ts.astimezone(UTC),
-                    _decimal(row["open"], "market open"),
-                    (
-                        _decimal(row["quote_volume"], "quote volume")
-                        if liquidity == "quote_volume"
-                        else _decimal(row["volume"], "base volume")
-                        * _decimal(row["open"], "market open")
-                    ),
-                    expected,
+                source_name = expected_symbol.split(":")[-1]
+                if row["symbol"] != source_name:
+                    raise MarketDataBlocked("WRONG_NATIVE_1M_ROW_SYMBOL")
+                open_px = _decimal(row["open"], "market open")
+                high = _decimal(row["high"], "market high")
+                low = _decimal(row["low"], "market low")
+                close = _decimal(row["close"], "market close")
+                base_volume = _decimal(row["volume"], "base volume")
+                if (
+                    low <= ZERO
+                    or low > min(open_px, close)
+                    or high < max(open_px, close)
+                    or base_volume < ZERO
+                ):
+                    raise MarketDataBlocked("INVALID_NATIVE_1M_OHLCV")
+                quote_volume = (
+                    _decimal(row["quote_volume"], "quote volume")
+                    if has_quote
+                    else base_volume * open_px
                 )
-                if bar.open <= ZERO or bar.quote_volume < ZERO:
-                    raise MarketDataBlocked("INVALID_1M_DATA")
+                if quote_volume < ZERO:
+                    raise MarketDataBlocked("INVALID_NATIVE_1M_VOLUME")
+                bar = MinuteBar(ts.astimezone(UTC), open_px, quote_volume, expected)
                 rows[bar.timestamp] = bar
             if not rows:
                 raise MarketDataBlocked("EMPTY_MARKET_DAY")
@@ -215,6 +234,8 @@ class _VirtualBook:
             / TEN_K
         )
         for instrument, qty in self.positions.items():
+            if qty == ZERO:
+                continue
             cost = abs(qty * prices[instrument]) * rate
             self.flows[instrument] = self.flows.get(instrument, ZERO) - cost
             self.funding += cost
@@ -244,7 +265,10 @@ class _VirtualBook:
             self.flows[instrument] = (
                 self.flows.get(instrument, ZERO) - delta * execution_price - fee
             )
-            self.positions[instrument] = wanted
+            if wanted == ZERO:
+                self.positions.pop(instrument, None)
+            else:
+                self.positions[instrument] = wanted
             self.turnover += notional
             self.fees += fee
             self.impact += abs(delta * (execution_price - bar.open))
@@ -252,7 +276,11 @@ class _VirtualBook:
 
     def pnl_by_instrument(self, prices: dict[str, Decimal]) -> dict[str, Decimal]:
         return {
-            instrument: flow + self.positions.get(instrument, ZERO) * prices[instrument]
+            instrument: (
+                flow + self.positions[instrument] * prices[instrument]
+                if instrument in self.positions and self.positions[instrument] != ZERO
+                else flow
+            )
             for instrument, flow in sorted(self.flows.items())
         }
 

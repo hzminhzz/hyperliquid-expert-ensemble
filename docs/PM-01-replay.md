@@ -1,4 +1,6 @@
-# PM-01 — Whole-wallet research/shadow replay boundary
+# PM-01 — Legacy Rust observation replay boundary (separate research)
+
+**Priority correction (2026-10-30):** The active PM-01 36-wallet implementation is **fill-only**, from HyperX immutable fills and native Hyperliquid 1-minute OHLCV. Read [PM-01-fill-only.md](PM-01-fill-only.md). This page documents the older optional Rust-observation audit, which is a separate tool: missing Rust observations are NOT a source-history blocker or requirement for PM-01.
 
 Issue: [#3](https://github.com/hzminhzz/hyperliquid-expert-ensemble/issues/3).
 Implementation: `ensemble.pm_sources`, `pm_portfolio`, `pm_shadow`,
