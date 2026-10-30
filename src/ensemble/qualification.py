@@ -81,8 +81,14 @@ def decide_qualification(
         historical = GateStatus.INCONCLUSIVE
 
     live_status = live_forward.status if live_forward is not None else GateStatus.NOT_RUN
+    # Upstream engineering/source admission is a prerequisite for promotion.
+    # BLOCKED is tolerated in the engineering *summary*, never for emission.
+    source_gates_pass = all(
+        gate.status is GateStatus.PASS for gate in (er0, er1, er2, er3)
+    )
     predictive_enabled = (
-        historical is GateStatus.PASS
+        source_gates_pass
+        and historical is GateStatus.PASS
         and live_status is GateStatus.PASS
         and promoted_policy_revision is not None
     )
@@ -96,6 +102,8 @@ def decide_qualification(
         next_frontier = "collect prospective outcome-mature ER4 evidence"
     elif historical is not GateStatus.PASS:
         next_frontier = "resolve historical predictive qualification"
+    elif not source_gates_pass:
+        next_frontier = "resolve upstream source and engineering qualification"
     elif live_status is not GateStatus.PASS:
         next_frontier = "run frozen V30 live-forward shadow gate"
     elif not production_approval:
