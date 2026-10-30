@@ -891,6 +891,18 @@ class EnsembleRuntime:
             "schema_version": "1.0",
             "timestamp": datetime.now(UTC).isoformat(),
             "mode": "advisory",
+            "release": {
+                "status": (
+                    "PINNED" if os.getenv("COPYTRADE_RELEASE_ENSEMBLE_SHA")
+                    and os.getenv("COPYTRADE_RELEASE_TRACKER_SHA")
+                    and os.getenv("COPYTRADE_RELEASE_MANIFEST") else "UNPINNED"
+                ),
+                "ensemble_sha": os.getenv("COPYTRADE_RELEASE_ENSEMBLE_SHA"),
+                "tracker_sha": os.getenv("COPYTRADE_RELEASE_TRACKER_SHA"),
+                "config_sha256": os.getenv("COPYTRADE_CONFIG_SHA256"),
+                "manifest_path": os.getenv("COPYTRADE_RELEASE_MANIFEST"),
+                "loaded_module": str(Path(__file__).resolve()),
+            },
             "authority": {
                 "financial_execution": False,
                 "financial_effect_guard": "FINANCIAL_EFFECT_FORBIDDEN",

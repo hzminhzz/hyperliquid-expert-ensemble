@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import subprocess
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,28 @@ def _memory() -> dict[str, int | None]:
     }
 
 
+def _service_statuses() -> dict[str, str]:
+    units = {
+        "observer": "copytrade-tracker.service",
+        "ensemble": "copytrade-ensemble.service",
+        "collector_timer": "copytrade-opportunity-shadow.timer",
+        "evaluator_timer": "copytrade-opportunity-outcomes.timer",
+        "digest_timer": "copytrade-flow-digest.timer",
+    }
+    result: dict[str, str] = {}
+    for name, unit in units.items():
+        try:
+            completed = subprocess.run(
+                ["systemctl", "--user", "show", "-p", "ActiveState", unit],
+                capture_output=True, text=True, timeout=2, check=False,
+            )
+            state = completed.stdout.partition("=")[2].strip()
+            result[name] = state if completed.returncode == 0 and state else "unavailable"
+        except (OSError, subprocess.TimeoutExpired):
+            result[name] = "unavailable"
+    return result
+
+
 def inspect_integrity(
     *,
     ledger_db:Path,
@@ -48,6 +71,7 @@ def inspect_integrity(
     opportunity_db:Path|None=None,
     outcome_db:Path|None=None,
     now:datetime|None=None,
+    inspect_systemd:bool=False,
 ) -> dict[str,Any]:
     now=now or datetime.now(UTC)
     output:dict[str,Any]={
@@ -142,6 +166,10 @@ def inspect_integrity(
                 "candidate_count":int(count),"newest_first_known_at":last_known,
                 "predictive_qualification":"BLOCKED",
             }
+            source_seq = output["source"].get("current_seq")
+            if (source_seq is not None and cursor is not None
+                    and int(source_seq) - int(cursor) > 200):
+                output["blockers"].append("OPPORTUNITY_COLLECTOR_CURSOR_STALE")
     if outcome_db is not None and outcome_db.exists():
         with closing(sqlite3.connect(
             f"file:{outcome_db}?mode=ro",uri=True,timeout=5
@@ -190,6 +218,7 @@ def inspect_integrity(
             "wallets":health.get("experts",{}).get("configured"),
             "last_error":health.get("last_error"),
             "telegram_delivery":health.get("telegram",{}).get("last_delivery_ok"),
+            "release": health.get("release", {"status": "UNPINNED"}),
         }
         qualification=str(health.get("research",{}).get("status","UNKNOWN"))
         output["research"]={"qualification":qualification}
@@ -205,6 +234,13 @@ def inspect_integrity(
     swap_free=output["memory"]["swap_free_mib"]
     if swap_free is not None and swap_free <= 64:
         output["blockers"].append("HOST_SWAP_HEADROOM_LOW")
+    if inspect_systemd:
+        output["components"] = _service_statuses()
+        for name, state in output["components"].items():
+            if state != "active":
+                output["blockers"].append(f"{name.upper()}_NOT_ACTIVE")
+        if output.get("runtime", {}).get("release", {}).get("status") != "PINNED":
+            output["blockers"].append("RELEASE_UNPINNED")
     # A capability-correct agent brief is small and cannot suggest financial orders.
     if len(json.dumps(output,separators=(",",":")).encode())>=6144:
         raise ValueError("system inspection must remain compact")

@@ -380,6 +380,7 @@ def main(argv: list[str] | None = None) -> None:
             ledger_db=args.ledger, research_db=args.prices,
             opportunity_db=args.journal,outcome_db=args.outcomes,
             health_path=Path("/home/quant/.local/share/copytrade/ensemble-health.json"),
+            inspect_systemd=True,
         )
     else:
         journal=OpportunityJournal(settings.journal_db)
