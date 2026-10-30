@@ -125,6 +125,82 @@ def test_two_wallets_never_become_a_directional_watch(tmp_path:Path)->None:
     assert "LINK" not in render_flow_digest(board)
 
 
+def test_board_uses_latest_as_known_lifecycle_not_initial_entry_status(tmp_path:Path)->None:
+    from decimal import Decimal
+
+    from ensemble.copy_opportunities import OpportunityJournal, TradeTransition
+
+    path = tmp_path / "lifecycle.db"
+    j = OpportunityJournal(path)
+    t0 = NOW - timedelta(minutes=50)
+    instrument = "hyperliquid:mainnet:perp:default:SOL"
+
+    def change(seq:int, wallet:str, before:str, after:str, at:datetime)->TradeTransition:
+        from ensemble.wallet_evidence import classify_intent
+
+        return TradeTransition(
+            source_id=f"scope-{seq}", wallet_id=wallet, instrument_id=instrument,
+            source_kind=classify_intent(Decimal(before), Decimal(after)).value,
+            quantity_before=Decimal(before), quantity_after=Decimal(after),
+            price=Decimal(100), event_at=at,
+            known_at=at + timedelta(seconds=1), ledger_id="ledger-board",
+            ledger_seq=seq,
+        )
+
+    try:
+        for seq, wallet in enumerate(("w1", "w2", "w3"), start=1):
+            assert j.observe(change(seq, wallet, "0", "1", t0)) is not None
+        assert j.observe(change(4,"w1","1","2",t0+timedelta(minutes=11))) is not None
+        before = build_trade_flow_board(
+            journal_db=path, now=t0+timedelta(minutes=20), hours=1
+        )
+        assert next(c for c in before["coins"] if c["coin"]=="SOL")["observed_directional_bias"] == "LONG_WATCH"
+        assert j.observe(change(5,"w1","2","0",t0+timedelta(minutes=25))) is not None
+        after = build_trade_flow_board(journal_db=path, now=NOW, hours=1)
+        sol = next(c for c in after["coins"] if c["coin"]=="SOL")
+        assert sol["long_entry_wallets"] == 2
+        assert sol["observed_directional_bias"] != "LONG_WATCH"
+    finally:
+        j.close()
+
+
+def test_durable_source_gap_hides_prior_entry_votes_without_fabricating_exits(tmp_path:Path)->None:
+    from decimal import Decimal
+
+    from ensemble.copy_opportunities import OpportunityJournal, TradeTransition
+
+    p=tmp_path/"gap.db"
+    j=OpportunityJournal(p)
+    at=NOW-timedelta(minutes=45)
+    instrument="hyperliquid:mainnet:perp:default:BTC"
+    try:
+        for seq,wallet in enumerate(("w1","w2","w3"),start=1):
+            entry=TradeTransition(
+                source_id=f"entry-{seq}", wallet_id=wallet, instrument_id=instrument,
+                source_kind="OPEN", quantity_before=Decimal(0),
+                quantity_after=Decimal(1), price=Decimal(100),
+                event_at=at, known_at=at+timedelta(seconds=1),
+                ledger_id="ledger-gap",ledger_seq=seq,
+            )
+            assert j.observe(entry) is not None
+        before=build_trade_flow_board(journal_db=p,now=at+timedelta(minutes=10),hours=1)
+        assert before["coins"][0]["observed_directional_bias"]=="LONG_WATCH"
+        j.record_source_gap(
+            ledger_id="ledger-gap",ledger_seq=4,
+            source_id="gap-4",known_at=at+timedelta(minutes=20),
+            reason="DISCONNECTED_GAP_UNVERIFIED",
+        )
+        after=build_trade_flow_board(journal_db=p,now=NOW,hours=1)
+        assert after["fresh_entry_events"]==0
+        assert after["coverage_gap_boundary"] is not None
+        assert j.get("copy:nonexistent") is None
+        assert j.stats()["opportunities"]=={"ENTER":3}
+        earlier=build_trade_flow_board(journal_db=p,now=at+timedelta(minutes=10),hours=1)
+        assert earlier["coins"][0]["observed_directional_bias"]=="LONG_WATCH"
+    finally:
+        j.close()
+
+
 def test_board_respects_as_known_cut_and_reports_truncation(tmp_path:Path)->None:
     p=tmp_path/"copy.db"
     make_db(p)

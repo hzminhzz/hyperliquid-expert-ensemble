@@ -103,7 +103,19 @@ class ShadowConsumer:
                 seq=int(row["seq"])
                 if seq!=cursor+1:
                     raise ValueError("source cursor gap; no reliable opportunity interpretation")
-                if row["kind"]!="POSITION_CHANGE":
+                if (row["kind"]=="COVERAGE_CHANGE"
+                        and str(row["quality"]).lower() != "valid"):
+                    payload=json.loads(str(row["payload"]))
+                    if not isinstance(payload,dict):
+                        raise ValueError("invalid source gap payload")
+                    self.journal.record_source_gap(
+                        ledger_id=self.ledger_id,ledger_seq=seq,
+                        source_id=str(row["event_id"]),
+                        known_at=datetime.fromisoformat(str(row["known_at"])),
+                        reason=str(payload.get("status") or "SOURCE_COVERAGE_DEGRADED"),
+                    )
+                    skipped+=1
+                elif row["kind"]!="POSITION_CHANGE":
                     with self.journal.db:
                         self.journal.seal_cursor(self.ledger_id,seq)
                     skipped+=1

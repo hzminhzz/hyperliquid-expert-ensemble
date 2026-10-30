@@ -35,13 +35,37 @@ def build_trade_flow_board(
                 "predictive_qualified":False, "coins":[]}
     with closing(sqlite3.connect(f"file:{journal_db}?mode=ro",uri=True,timeout=10)) as db:
         db.row_factory=sqlite3.Row
+        has_updates=db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='opportunity_updates'"
+        ).fetchone() is not None
+        # Historical first decisions stay frozen. A separate latest-as-known
+        # lifecycle projection decides whether they are still current at the cut.
+        lifecycle=(
+            "(SELECT u.status FROM opportunity_updates u "
+            "WHERE u.opportunity_id=d.opportunity_id AND u.known_at<=? "
+            "ORDER BY u.ledger_seq DESC,u.rowid DESC LIMIT 1)"
+            if has_updates else "NULL"
+        )
         rows=db.execute(
-            "SELECT opportunity_id,instrument_id,wallet_id,first_known_at,"
-            "family,source_action,copy_direction,blocker FROM opportunity_decisions "
-            "WHERE first_known_at>? AND first_known_at<=? "
-            "ORDER BY first_known_at DESC LIMIT ?",
-            (since.isoformat(),cut.isoformat(),max_source_rows+1),
+            "SELECT d.opportunity_id,d.instrument_id,d.wallet_id,d.first_known_at,"
+            "d.family,d.source_action,d.copy_direction,d.blocker,"
+            + lifecycle + " AS lifecycle_status FROM opportunity_decisions d "
+            "WHERE d.first_known_at>? AND d.first_known_at<=? "
+            "ORDER BY d.first_known_at DESC LIMIT ?",
+            ((cut.isoformat(),) if has_updates else ())
+            + (since.isoformat(),cut.isoformat(),max_source_rows+1),
         ).fetchall()
+        has_barriers=db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='source_coverage_barriers'"
+        ).fetchone() is not None
+        latest_barrier=(
+            db.execute(
+                "SELECT max(known_at) FROM source_coverage_barriers WHERE known_at<=?",
+                (cut.isoformat(),),
+            ).fetchone()[0]
+            if has_barriers else None
+        )
     truncated=len(rows)>max_source_rows
     if truncated:
         rows=rows[:max_source_rows]
@@ -49,6 +73,10 @@ def build_trade_flow_board(
     fresh_total=0
     risk_total=0
     for row in rows:
+        # A source outage cannot be used as proof that a wallet stayed long or
+        # short. Suppress pre-gap votes; never fabricate an EXIT or rewrite them.
+        if latest_barrier is not None and row["first_known_at"]<=latest_barrier:
+            continue
         family=str(row["family"])
         if family not in _ALLOWED:
             continue
@@ -64,9 +92,12 @@ def build_trade_flow_board(
             "new_events":0,"latest_known_at":str(row["first_known_at"]),
         })
         wallet=str(row["wallet_id"]).lower()
-        if family in {"ENTER","INCREASE","REVERSE"} and row["blocker"] is None:
-            # Rows are newest-first. A wallet reversing within the hour is
-            # represented by its latest entry direction, not two opposing votes.
+        if (family in {"ENTER","INCREASE","REVERSE"}
+                and row["blocker"] is None
+                and row["lifecycle_status"] not in ("INVALIDATED", "EXPIRED")):
+            # Rows are newest-first. Terminal changes known before this
+            # decision cut cannot count as current directional support.
+            # Within the hour a wallet's latest surviving direction wins.
             if wallet not in entry["seen_entry_wallets"]:
                 if row["copy_direction"] == 1:
                     entry["entry_longs"].add(wallet)
@@ -131,6 +162,7 @@ def build_trade_flow_board(
         "status":"DESCRIPTIVE_ONLY_INDEPENDENCE_NOT_QUALIFIED",
         "as_of":cut.isoformat(),
         "window_start":since.isoformat(),
+        "coverage_gap_boundary":latest_barrier,
         "observed_opportunities":len(rows),
         "fresh_entry_events":fresh_total,
         "de_risk_events":risk_total,

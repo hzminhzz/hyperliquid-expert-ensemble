@@ -66,6 +66,31 @@ def test_retro_replay_then_restart_is_idempotent(tmp_path) -> None:
         restart.close()
 
 
+def test_collector_seals_durable_coverage_gap_without_relabeling_history(tmp_path) -> None:
+    path=tmp_path/"ledger.db"
+    ledger(path)
+    with closing(sqlite3.connect(path)) as db,db:
+        db.execute(
+            "UPDATE outbox_events SET kind='COVERAGE_CHANGE',quality='degraded',"
+            "payload=? WHERE seq=3",
+            (json.dumps({"status":"DISCONNECTED_GAP_UNVERIFIED",
+                         "history_during_gap":"UNVERIFIED"}),),
+        )
+    cfg=ShadowSettings(path,tmp_path/"copy.db",retrospective=True)
+    consumer=ShadowConsumer(cfg)
+    try:
+        assert consumer.scan()["cursor"]==4
+        assert consumer.journal.cursor("l")==4
+        row=consumer.journal.db.execute(
+            "SELECT ledger_seq,reason FROM source_coverage_barriers"
+        ).fetchone()
+        assert tuple(row)==(3,"DISCONNECTED_GAP_UNVERIFIED")
+        assert consumer.scan()["processed"]==0
+        assert consumer.journal.stats()["opportunities"]["ENTER"]==1
+    finally:
+        consumer.close()
+
+
 def test_prospective_activation_never_relabels_old_history(tmp_path) -> None:
     path=tmp_path/"ledger.db"
     ledger(path)
@@ -235,6 +260,6 @@ def test_copy_report_never_claims_executable_pnl(tmp_path) -> None:
         stats=runner.scan()
         assert not stats["financial_execution"]
         recent=runner.journal.recent()
-        assert all(item["revision"]=="DI2-shadow-v1" for item in recent)
+        assert all(item["revision"]=="DI2-shadow-v2" for item in recent)
     finally:
         runner.close()

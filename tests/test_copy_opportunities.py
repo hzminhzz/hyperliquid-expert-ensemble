@@ -142,6 +142,55 @@ def test_restart_reuses_cursor_and_identity(tmp_path) -> None:
         j.close()
 
 
+def test_late_exit_invalidates_all_open_lifecycles_without_rewriting_first_decisions(tmp_path) -> None:
+    p = tmp_path / "opp.db"
+    j = OpportunityJournal(p)
+    try:
+        at = BASE + timedelta(hours=1)
+        first = j.observe(trade(1, "0", "1", at=at))
+        assert first is not None
+        second = j.observe(trade(2, "1", "2", at=at + timedelta(minutes=11)))
+        assert second is not None and second.opportunity_id != first.opportunity_id
+        first_before = j.db.execute(
+            "SELECT payload_json FROM opportunity_decisions WHERE opportunity_id=?",
+            (first.opportunity_id,),
+        ).fetchone()[0]
+        assert j.observe(trade(3, "2", "0", at=at + timedelta(minutes=25))) is not None
+        for decision in (first, second):
+            latest = j.get(decision.opportunity_id)
+            assert latest is not None
+            assert latest["current_status"] == "INVALIDATED"
+            assert latest["latest_update"]["reason"] == "SOURCE_POSITION_CLOSED_OR_FLIPPED"
+            assert latest["status"] == "ACTIVE"  # Immutable as-known first decision
+        assert j.db.execute(
+            "SELECT payload_json FROM opportunity_decisions WHERE opportunity_id=?",
+            (first.opportunity_id,),
+        ).fetchone()[0] == first_before
+        assert len(j.get(first.opportunity_id)["updates"]) == 2
+    finally:
+        j.close()
+
+
+def test_policy_upgrade_does_not_leave_legacy_entry_open_after_exit(tmp_path) -> None:
+    from ensemble.copy_opportunities import OpportunityPolicy
+
+    p = tmp_path / "opp.db"
+    old = OpportunityJournal(p, policy=OpportunityPolicy(revision="DI2-shadow-v1"))
+    first = old.observe(trade(1, "0", "1"))
+    assert first is not None
+    old.close()
+    updated = OpportunityJournal(p)
+    try:
+        assert updated.observe(
+            trade(2, "1", "0", at=BASE + timedelta(minutes=30))
+        ) is not None
+        entry = updated.get(first.opportunity_id)
+        assert entry is not None and entry["current_status"] == "INVALIDATED"
+        assert entry["revision"] == "DI2-shadow-v1"
+    finally:
+        updated.close()
+
+
 def test_gap_rejected_and_does_not_advance_cursor(tmp_path) -> None:
     j=OpportunityJournal(tmp_path/"opp.db")
     try:

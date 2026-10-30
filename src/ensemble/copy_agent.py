@@ -36,15 +36,29 @@ def explain_copy_decision(
         if not row:
             return {"status":"NOT_FOUND","id":opportunity_id}
         cut=json.loads(str(row[0]))
+        updates=journal.execute(
+            "SELECT known_at,source_action,status,reason FROM opportunity_updates "
+            "WHERE opportunity_id=? ORDER BY ledger_seq LIMIT 26",
+            (opportunity_id,),
+        ).fetchall()
         changes=[
             {"known_at":str(r["known_at"]),"action":str(r["source_action"]),
              "transition":str(r["status"]),"reason":r["reason"]}
-            for r in journal.execute(
-                "SELECT known_at,source_action,status,reason FROM opportunity_updates "
-                "WHERE opportunity_id=? ORDER BY ledger_seq LIMIT 25",
-                (opportunity_id,),
-            )
+            for r in updates[:25]
         ]
+        last=journal.execute(
+            "SELECT known_at,source_action,status,reason FROM opportunity_updates "
+            "WHERE opportunity_id=? ORDER BY ledger_seq DESC,rowid DESC LIMIT 1",
+            (opportunity_id,),
+        ).fetchone()
+        latest=(
+            {"known_at":str(last["known_at"]),"action":str(last["source_action"]),
+             "transition":str(last["status"]),"reason":last["reason"]}
+            if last is not None else None
+        )
+        state=str(last["status"] if last else cut.get("status","UNKNOWN"))
+        if state=="UPDATED":
+            state="ACTIVE"
     outcomes=[]
     if outcome_db.exists():
         with closing(_open(outcome_db)) as research:
@@ -74,6 +88,9 @@ def explain_copy_decision(
         "schema":"CopyDecisionCapsule-v1",
         "status":"FOUND_SHADOW_ONLY",
         "immutable_as_known_decision":cut,
+        "current_lifecycle_status":state,
+        "latest_transition":latest,
+        "transitions_truncated":len(updates)>25,
         "subsequent_source_transitions":changes,
         "separately_matured_outcomes":outcomes,
         "independent_wallet_support":"UNKNOWN",

@@ -166,6 +166,20 @@ def inspect_integrity(
                 "candidate_count":int(count),"newest_first_known_at":last_known,
                 "predictive_qualification":"BLOCKED",
             }
+            has_barriers=db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='source_coverage_barriers'"
+            ).fetchone() is not None
+            if has_barriers:
+                barrier=db.execute(
+                    "SELECT ledger_seq,known_at,reason FROM source_coverage_barriers "
+                    "ORDER BY ledger_seq DESC LIMIT 1"
+                ).fetchone()
+                if barrier is not None:
+                    output["opportunities"]["latest_source_gap"]={
+                        "seq":int(barrier[0]),"known_at":str(barrier[1]),
+                        "reason":str(barrier[2]),
+                    }
             source_seq = output["source"].get("current_seq")
             if (source_seq is not None and cursor is not None
                     and int(source_seq) - int(cursor) > 200):

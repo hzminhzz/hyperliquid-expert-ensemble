@@ -102,7 +102,8 @@ class TradeTransition:
 
 @dataclass(frozen=True, slots=True)
 class OpportunityPolicy:
-    revision: str = "DI2-shadow-v1"
+    # Lifecycle semantics changed: do not silently reuse the old policy identity.
+    revision: str = "DI2-shadow-v2"
     coalesce_window: timedelta = timedelta(minutes=10)
     action_latency: timedelta = timedelta(seconds=2)
     max_observation_delay: timedelta = timedelta(seconds=30)
@@ -189,6 +190,8 @@ CREATE INDEX IF NOT EXISTS idx_opportunity_scope
  ON opportunity_decisions(wallet_id,instrument_id,first_known_at);
 CREATE INDEX IF NOT EXISTS idx_opportunity_known
  ON opportunity_decisions(first_known_at);
+CREATE INDEX IF NOT EXISTS idx_opportunity_live_scope
+ ON opportunity_decisions(wallet_id,instrument_id,copy_direction,first_ledger_seq);
 CREATE TABLE IF NOT EXISTS opportunity_updates (
  source_id TEXT PRIMARY KEY, opportunity_id TEXT,
  ledger_seq INTEGER NOT NULL, event_at TEXT NOT NULL,
@@ -201,6 +204,13 @@ CREATE TABLE IF NOT EXISTS opportunity_exclusions (
  source_id TEXT PRIMARY KEY, ledger_seq INTEGER NOT NULL UNIQUE,
  reason TEXT NOT NULL, known_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS source_coverage_barriers (
+ ledger_id TEXT NOT NULL, ledger_seq INTEGER NOT NULL,
+ source_id TEXT NOT NULL UNIQUE, known_at TEXT NOT NULL,
+ reason TEXT NOT NULL, PRIMARY KEY (ledger_id,ledger_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_source_barriers_known
+ ON source_coverage_barriers(known_at);
 """
 
 
@@ -240,11 +250,56 @@ class OpportunityJournal:
             "DO UPDATE SET last_seq=excluded.last_seq", (ledger_id, seq)
         )
 
+    def record_source_gap(
+        self, *, ledger_id: str, ledger_seq: int, source_id: str,
+        known_at: datetime, reason: str,
+    ) -> None:
+        """Persist a source-coverage barrier atomically with the ledger cursor.
+
+        This does not mark any wallet flat, rewrite a historical decision, or
+        claim missing public trades have been recovered. It only prevents
+        earlier directional votes being presented as currently valid.
+        """
+        if known_at.tzinfo is None or not reason or ledger_seq <= 0:
+            raise ValueError("invalid source coverage boundary")
+        with self.db:
+            last_seq = self.cursor(ledger_id)
+            if ledger_seq <= last_seq:
+                return
+            if last_seq > 0 and ledger_seq != last_seq + 1:
+                raise ValueError("ledger gap: coverage boundary must preserve source order")
+            self.db.execute(
+                "INSERT INTO source_coverage_barriers VALUES (?,?,?,?,?)",
+                (ledger_id,ledger_seq,source_id,known_at.isoformat(),reason),
+            )
+            self.seal_cursor(ledger_id,ledger_seq)
+
     def _last_update(self, opportunity_id: str) -> sqlite3.Row | None:
         return self.db.execute(
             "SELECT * FROM opportunity_updates WHERE opportunity_id=? "
-            "ORDER BY ledger_seq DESC LIMIT 1", (opportunity_id,)
+            "ORDER BY ledger_seq DESC,rowid DESC LIMIT 1", (opportunity_id,)
         ).fetchone()
+
+    def _unclosed_direction(
+        self, change: TradeTransition, direction: int,
+    ) -> list[str]:
+        """Find all current entries independently of the ADD-coalescing time window.
+
+        Also include prior policy revisions: a policy change must not strand a live
+        opportunity when its source wallet later exits. All queries are scoped to
+        exactly one wallet, instrument and source direction.
+        """
+        rows = self.db.execute(
+            "SELECT opportunity_id FROM opportunity_decisions "
+            "WHERE wallet_id=? AND instrument_id=? AND copy_direction=? "
+            "AND status='ACTIVE' ORDER BY first_ledger_seq",
+            (change.wallet_id, change.instrument_id, direction),
+        ).fetchall()
+        return [
+            str(row["opportunity_id"]) for row in rows
+            if not (last := self._last_update(str(row["opportunity_id"])))
+            or last["status"] not in ("INVALIDATED", "EXPIRED")
+        ]
 
     def _active_same_direction(
         self, change: TradeTransition, direction: int,
@@ -321,14 +376,17 @@ class OpportunityJournal:
                 existing = self._active_same_direction(change, direction)
             if kind in (CopyKind.EXIT, CopyKind.REVERSE):
                 old_direction = 1 if change.quantity_before > 0 else -1
-                active = self._active_same_direction(change, old_direction)
-                if active:
+                # A late CLOSE/FLIP terminates every outstanding entry for this
+                # wallet/instrument/direction, not just a fill within 10 minutes.
+                # Initial decisions and fixed-horizon outcomes remain immutable.
+                for active in self._unclosed_direction(change, old_direction):
                     self.db.execute(
                         "INSERT INTO opportunity_updates VALUES (?,?,?,?,?,?,?,?,?)",
-                        (change.source_id + ":close", active, change.ledger_seq,
-                         change.event_at.isoformat(), change.known_at.isoformat(),
-                         action, OpportunityStatus.INVALIDATED.value,
-                         "SOURCE_POSITION_CLOSED_OR_FLIPPED", "{}"),
+                        (change.source_id + ":close:" + active, active,
+                         change.ledger_seq, change.event_at.isoformat(),
+                         change.known_at.isoformat(), action,
+                         OpportunityStatus.INVALIDATED.value,
+                         blocker or "SOURCE_POSITION_CLOSED_OR_FLIPPED", "{}"),
                     )
             if kind in (CopyKind.DE_RISK, CopyKind.EXIT) or blocker:
                 reason = blocker or "DE_RISK_NOT_OPPOSITE_ENTRY"
@@ -405,9 +463,16 @@ class OpportunityJournal:
         result = json.loads(str(row[0]))
         updates = self.db.execute(
             "SELECT source_action,status,known_at,reason FROM opportunity_updates "
-            "WHERE opportunity_id=? ORDER BY ledger_seq LIMIT 30", (opportunity_id,),
+            "WHERE opportunity_id=? ORDER BY ledger_seq LIMIT 31", (opportunity_id,),
         ).fetchall()
-        result["updates"] = [dict(r) for r in updates]
+        result["updates"] = [dict(r) for r in updates[:30]]
+        result["updates_truncated"] = len(updates) > 30
+        last = self._last_update(opportunity_id)
+        result["latest_update"] = dict(last) if last is not None else None
+        raw_status = str(last["status"] if last else result["status"])
+        result["current_status"] = (
+            "ACTIVE" if raw_status == OpportunityStatus.UPDATED.value else raw_status
+        )
         result["authority"] = "SHADOW_ONLY_NOT_PREDICTIVE_QUALIFIED"
         result["expected_return"] = None
         return result

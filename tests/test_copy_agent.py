@@ -37,6 +37,41 @@ def create(path:Path)->None:
         ))
 
 
+def test_explain_displays_latest_terminal_state_separately_from_original(tmp_path:Path)->None:
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from ensemble.copy_opportunities import OpportunityJournal, TradeTransition
+
+    path=tmp_path/"lifecycle.db"
+    j=OpportunityJournal(path)
+    def event(seq:int,before:int,after:int,at:datetime)->TradeTransition:
+        from ensemble.wallet_evidence import classify_intent
+
+        return TradeTransition(
+            source_id=f"event-{seq}",wallet_id="w1",
+            instrument_id="hyperliquid:mainnet:perp:default:BTC",
+            source_kind=classify_intent(Decimal(before),Decimal(after)).value,
+            quantity_before=Decimal(before),quantity_after=Decimal(after),
+            price=Decimal(100),event_at=at,known_at=at+timedelta(seconds=1),
+            ledger_id="l",ledger_seq=seq,
+        )
+    try:
+        original=j.observe(event(1,0,1,AT))
+        assert original is not None
+        j.observe(event(2,1,0,AT+timedelta(minutes=25)))
+    finally:
+        j.close()
+    report=explain_copy_decision(
+        journal_db=path,outcome_db=tmp_path/"missing.db",
+        opportunity_id=original.opportunity_id,
+    )
+    assert report["immutable_as_known_decision"]["status"]=="ACTIVE"
+    assert report["current_lifecycle_status"]=="INVALIDATED"
+    assert report["latest_transition"]["reason"]=="SOURCE_POSITION_CLOSED_OR_FLIPPED"
+    assert report["trade_entry_recommendation"] is None
+
+
 def test_lookups_keep_immutable_cut_separate_from_unqualified_outcomes(tmp_path:Path)->None:
     db=tmp_path/"copy.db"
     create(db)
