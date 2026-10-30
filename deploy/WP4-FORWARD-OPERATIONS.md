@@ -72,6 +72,8 @@ calibration, qualified wallet-skill score, or automatic promotion is authorized.
 uv run --frozen --no-sync python -m ensemble.copy_forward verify
 uv run --frozen --no-sync python -m ensemble.copy_forward_assess status
 uv run --frozen --no-sync python -m ensemble.copy_shadow health
+uv run --frozen --no-sync python -m ensemble.copy_forward_evidence list --limit 30
+uv run --frozen --no-sync python -m ensemble.copy_forward_evidence storage
 
 systemctl --user is-active copytrade-tracker.service copytrade-ensemble.service \
   copytrade-flow-digest.timer copytrade-forward-evaluate.timer \
