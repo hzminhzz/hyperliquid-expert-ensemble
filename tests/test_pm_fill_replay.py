@@ -280,6 +280,13 @@ def test_liquidity_cap_blocks_whole_source_book(tmp_path):
     assert result["status"] == "BLOCKED_MARKET_OR_EXECUTION"
     assert result["reason"] == "MINUTE_PARTICIPATION_EXCEEDED"
     assert result["pnl"] is None
+    assert result["blocked_virtual_book"] in {"FOLLOWER", "MATCHED_LONG_ONLY"}
+    assert Decimal(result["requested_order_notional"]) > Decimal(
+        result["max_5pct_participation_notional"]
+    )
+    assert Decimal(result["required_participation_fraction"]) > Decimal("0.05")
+    assert result["minute_volume_is_ex_post_not_orderbook_depth"] is True
+    assert len(result["market_volume_source_day_sha256"]) == 64
 
 
 def test_paired_long_only_control_diverges_for_a_profitable_short(tmp_path):

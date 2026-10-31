@@ -7,7 +7,22 @@ from pathlib import Path
 
 import pytest
 
-from ensemble.pm_chd_target_1m import fetch_days
+from ensemble.pm_chd_target_1m import fetch_days, _day_grid_quality
+
+
+def test_day_sha_is_not_completeness_or_executable_capacity():
+    full = _day_grid_quality({"bars": 1440, "zero_volume_minutes": 1100})
+    assert full["full_utc_minute_grid"] is True
+    assert full["zero_volume_minutes"] == 1100
+    assert full["market_capacity_verified"] is False
+    missing = _day_grid_quality({"bars": 1424, "zero_volume_minutes": 883})
+    assert missing["full_utc_minute_grid"] is False
+    assert missing["missing_utc_minutes"] == 16
+    assert missing["market_capacity_verified"] is False
+    unknown = _day_grid_quality({"sha256": "a" * 64})
+    assert unknown["full_utc_minute_grid"] is None
+    assert unknown["missing_utc_minutes"] is None
+    assert unknown["market_capacity_verified"] is False
 
 
 def _audit(tmp_path: Path):

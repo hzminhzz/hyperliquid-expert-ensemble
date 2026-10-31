@@ -1,5 +1,7 @@
 # PM-01 — Fill-only historical replay (36 Hyperliquid wallets)
 
+**Latest direct-execution forensic report:** [2026-10-31 source recovery, liquidity and first-local-receipt audit](PM-01-2026-10-31-direct-execution.md). Its 1,519/2,433 market-day figure supersedes older day-count snapshots below; the scientific qualification gate remains **BLOCKED_EVIDENCE**.
+
 **Authoritative research inputs:** private, immutable HyperX fills for the full **6 original + 10 Wave 1 + 20 Wave 2** cohort, and validated **native Hyperliquid** 1-minute OHLCV from the user's ml4t-data lake. The independent Rust observation tracker is **not** a PM-01 data source, gating criterion, or dependency. Missing Rust observations for 14 aliases must not disqualify their fill-based research.
 
 **Authority:** retrospective portfolio research / paper shadow only; NO orders, broker execution, prop-firm policy promotion, Telegram changes, or claims of follower realized profits. The offline replay and audit components never require provider credentials; the separately invoked authenticated recovery utilities load the existing data keys privately and never place orders.

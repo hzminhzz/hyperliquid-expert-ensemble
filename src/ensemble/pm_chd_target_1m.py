@@ -20,6 +20,26 @@ import time
 from .pm_research import _write_private_evidence
 
 
+def _day_grid_quality(meta: dict) -> dict:
+    """Parquet SHA verifies bytes, not a complete/executable 1m day."""
+    bars = meta.get("bars")
+    if type(bars) is not int or not 0 < bars <= 1440:
+        return {
+            "bar_count": bars if type(bars) is int else None,
+            "full_utc_minute_grid": None,
+            "missing_utc_minutes": None,
+            "market_capacity_verified": False,
+        }
+    empty = meta.get("zero_volume_minutes")
+    return {
+        "bar_count": bars,
+        "full_utc_minute_grid": bars == 1440,
+        "missing_utc_minutes": 1440 - bars,
+        "zero_volume_minutes": empty if type(empty) is int and empty >= 0 else None,
+        "market_capacity_verified": False,
+    }
+
+
 def fetch_days(
     ml4t_root: Path,
     audit: Path,
@@ -66,6 +86,7 @@ def fetch_days(
             if dest.exists() or source.exists():
                 # No rewrite or repair of any pre-existing canonical partition.
                 status = "BLOCKED_ALREADY_PRESENT"
+                quality = {}
                 if dest.is_file() and source.is_file():
                     meta = json.loads(source.read_text())
                     if (
@@ -74,12 +95,14 @@ def fetch_days(
                         and meta.get("source_symbol") == symbol
                     ):
                         status = "REUSED_SHA_VERIFIED_EXISTING"
+                        quality = _day_grid_quality(meta)
                 verified.append(
                     {
                         "symbol": symbol,
                         "day": day_text,
                         "status": status,
                         "canonical_partition_modified": False,
+                        **quality,
                     }
                 )
                 continue
@@ -116,15 +139,20 @@ def fetch_days(
                     or meta.get("provider") != "CryptoHFTData"
                 ):
                     raise ValueError("CHD_SOURCE_PROVENANCE_CONFLICT")
+                quality = _day_grid_quality(meta)
                 verified.append(
                     {
                         "symbol": symbol,
                         "day": day_text,
-                        "status": "WRITER_PUBLISHED_SHA_VERIFIED",
+                        "status": (
+                            "WRITER_PUBLISHED_SHA_VERIFIED"
+                            if quality["full_utc_minute_grid"] is True
+                            else "WRITER_PUBLISHED_SHA_VERIFIED_PARTIAL_OR_UNKNOWN_GRID"
+                        ),
                         "sha256": digest,
-                        "bar_count": meta.get("bars"),
                         "source_type": meta["source_type"],
                         "canonical_partition_modified": True,
+                        **quality,
                     }
                 )
             except Exception as ex:

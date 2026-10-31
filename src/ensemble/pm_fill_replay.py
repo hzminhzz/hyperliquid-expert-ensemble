@@ -358,20 +358,33 @@ def replay_wallet(
             scalar = model.initial_cash * model.portfolio_multiplier / gross if gross else ZERO
             desired = {name: qty * scalar for name, qty in active.items()}
             matched_long = {name: abs(qty) for name, qty in desired.items()}
-            for book, target in ((follower, desired), (baseline, matched_long)):
+            for book, target, book_label in (
+                (follower, desired, "FOLLOWER"),
+                (baseline, matched_long, "MATCHED_LONG_ONLY"),
+            ):
                 for name in needed:
                     delta = target.get(name, ZERO) - book.positions.get(name, ZERO)
                     if delta != ZERO:
-                        if (
-                            quotes[name].quote_volume <= ZERO
-                            or abs(delta * marks[name])
-                            > quotes[name].quote_volume * model.max_minute_participation
-                        ):
+                        requested_notional = abs(delta * marks[name])
+                        traded_minute_notional = quotes[name].quote_volume
+                        max_notional = traded_minute_notional * model.max_minute_participation
+                        if traded_minute_notional <= ZERO or requested_notional > max_notional:
                             return {
                                 "status": "BLOCKED_MARKET_OR_EXECUTION",
                                 "reason": "MINUTE_PARTICIPATION_EXCEEDED",
                                 "instrument": name,
                                 "at": fill_time.isoformat(),
+                                "blocked_virtual_book": book_label,
+                                "requested_order_notional": str(requested_notional),
+                                "realized_minute_notional_proxy": str(traded_minute_notional),
+                                "max_5pct_participation_notional": str(max_notional),
+                                "required_participation_fraction": (
+                                    str(requested_notional / traded_minute_notional)
+                                    if traded_minute_notional > ZERO
+                                    else None
+                                ),
+                                "minute_volume_is_ex_post_not_orderbook_depth": True,
+                                "market_volume_source_day_sha256": quotes[name].source_sha256,
                             }
             if last_clock is not None:
                 elapsed = fill_time - last_clock
