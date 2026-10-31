@@ -201,6 +201,17 @@ def test_complete_hindsight_two_coin_follower_and_control_reconciled(tmp_path):
         assert outcome["actual_follower_fills"] is None
         assert outcome["source_equity_accounting_reconciled"] is False
         assert "matched_long_only_market_control_pnl" in outcome
+        assert sum(map(Decimal, outcome["follower_pnl_by_instrument"].values())) == Decimal(
+            outcome["pnl"]
+        )
+        assert sum(map(Decimal, outcome["market_only_pnl_by_instrument"].values())) == Decimal(
+            outcome["matched_long_only_market_control_pnl"]
+        )
+        ledger = outcome["accounting"]
+        assert Decimal(ledger["final_virtual_cash"]) + Decimal(
+            ledger["terminal_open_position_mtm"]
+        ) == Decimal(ledger["hypothetical_initial_capital"]) + Decimal(outcome["pnl"])
+        assert outcome["cost_assumptions"]["max_minute_participation_fraction"] == "0.05"
 
 
 def test_same_hypothetical_minute_actions_are_one_whole_book_rebalance(tmp_path):

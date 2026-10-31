@@ -216,6 +216,130 @@ or unavailable market-days, absence of executable L2 quotes and true
 first-known follower observations are independent unresolved blockers.
 `PM-02` is a separate session and untouched.
 
+## October 31 continuation: PM-03 research handoff and forward clock discovery
+
+This block supersedes the claim that a `pm01_fill_only_replay_v3` consumer
+is required. The independently developed PM-02 branch
+(`feat/pm02-manager-risk-allocation`, commit `0f0fdc9`) accepts only
+`pm01_fill_only_replay_v2`. PM-01 now preserves that existing envelope and
+adds evidence cards as an **additive extension**. This was tested with the
+actual PM-02 CLI against the real all-36 PM-01 fill-only replay.
+
+### Read-only PM-01 -> PM-02 -> PM-03 contract
+
+1. `ensemble.pm_fill_replay` produces a v2-envelope replay with 36
+   wallet identities, 5/15/60-minute modeled P&L, actual per-instrument
+   virtual P&L attribution, cash+MTM reconciliation and recorded cost
+   assumptions. Any blocked economic scenario has `pnl: null`, never
+   fake zero P&L. The v2 schema is required for PM-02 interoperability.
+2. `ensemble.pm_fill_tape` exports
+   `pm01_observed_book_tape_v1`, a compact, separate *historical-only*
+   source-event tape across all 36 HyperX wallets. It contains directly
+   observed signed initial positions and position transitions (including
+   OPEN/ADD/REDUCE/CLOSE/FLIP), account identity SHA, source-event clocks,
+   explicit unknown source positions and continuity failures.
+   `received_at`/`first_known_at`/`decision_at` are **null** for
+   the historical cached source. This tape is **not** an actionable
+   intraday follower stream.
+3. `ensemble.pm_handoff` validates both private content-addressed PM-01
+   artifacts and the **actual** PM-02 risk governance output, checking
+   SHA/content filename lineage, cohort and alias identity, source manifest
+   equality, frozen cutoff and decision clock monotonicity. It refuses
+   positive PM-02 risk proposals or forged first-known clocks in a
+   historical-only tape. Research-only PM-03 *synthetic engineering and
+   descriptive diagnostics* are allowed; real-account follower testing,
+   prop-firm execution and scientific capital qualification remain blocked.
+
+The real all-36 tape has 36/36 vendor-listed-book anchors and **two**
+wallets with *post-anchor* position discontinuities. The earlier source
+audit retains 15 unexplained continuity deltas over nine source wallets;
+the counts describe different scopes and must not be conflated. A
+vendor-listed-book anchor is **not a complete account snapshot**.
+
+Read-only evidence commands:
+
+```bash
+export PYTHONPATH=src
+PY=/home/quant/dev/quant/ml4t-data/.venv/bin/python
+ROOT=/home/quant/.local/share/copytrade/reports/five-pod-20261029-research
+OUT=/home/quant/.local/share/copytrade/reports/pm01-36-shadow
+BASE=/home/quant/.local/share/copytrade/reports/pm01-hyperx-gaps
+$PY -m ensemble.pm_fill_tape --research-root "$ROOT" --out "$OUT" \
+    --hyperx-generations "$BASE/g20261030t1710a" \
+      "$BASE/g20261030t1745b" "$BASE/g20261030t1755c" \
+      "$BASE/g20261030t1815d"
+# PM-02 is independently developed on its own feature branch.
+# Run its CLI against the generated v2 PM-01 replay and then check:
+$PY -m ensemble.pm_handoff --pm01 PATH_TO_SEALED_PM01_V2.json \
+    --tape PATH_TO_SEALED_PM01_TAPE.json \
+    --pm02 PATH_TO_SEALED_PM02.json --out "$OUT"
+```
+
+### True forward receipt experiment (HyperX Data API only)
+
+A new, bounded `ensemble.pm_hyperx_forward` module can open a read-only
+HyperX `/fills/ws` stream with the user's **existing Data API key** from
+the pinned private source adapter. It never loads a trading token or
+connects to an official Hyperliquid fills API. It writes owner-only,
+immutable `hyperx-observation-<SHA>.json` per first *locally observed*
+fill event, with exact source and receipt times. Reconnects preserve the
+earliest local receipt; source contradictions fail closed.
+
+- **Live 36-wallet WebSocket probe:** network connected; vendor sent a
+  subscription-capacity/tier-limit rejection, and closed the connection.
+  It produced **zero valid prospective observations**. Do not loop
+  connections, rotate addresses or bypass the quota.
+- **Live single-wallet probe (`CA-005`):** subscription ACK received.
+  No actual new fills arrived in the bounded 20-second probe; **zero**
+  prospective episode evidence resulted. The probe was not installed as
+  a long-running service. One connection ACK does not qualify a wallet.
+- Current HyperX API catalog advertises `/fills/ws` capacity
+  **free=1, Pro=50, Ultra=300 addresses** and per-message weights.
+  A *permitted* subscription tier allowing all 36 is a necessary
+  prerequisite for complete WebSocket forward monitoring through this
+  source. Permission and subscription rate still need verified
+  continuously observed evidence, source account snapshots, correct
+  market data and executable follower economics. No service deployment
+  or trading authorization occurred.
+
+Bounded one-shot probe (never run without Data API authorization):
+
+```bash
+$PY -m ensemble.pm_hyperx_forward \
+    --research-root "$ROOT" \
+    --out /home/quant/.local/share/copytrade/reports/pm01-hyperx-prospective/receipts \
+    --aliases CA-005 --duration 20 --max-messages 3
+```
+
+The provider explicitly limits subscription scope. **No claim of 36-wallet
+prospective coverage or qualified PMs is permitted** unless a valid
+provider contract and genuinely observed independent episodes exist.
+PM-03 can start building its **read-only synthetic account-risk engine**
+from these stable contracts, but PM-03 may not treat retrospective
+HyperX data as approved account risk, and cannot test live-account
+feasibility against qualified PMs yet.
+
+### Verified follow-up artifacts (same source inputs)
+
+- All-36 **PM-01 v2** fill-only 1%-gross replay SHA:
+  `2d09b1bf2c1327a8b68410ac397f9f4c7891ceb09b346dd8632193d48f00c652`.
+  All 36 wallet cards emitted; only three VS077 hindsight scenarios
+  completed, and 105 scenarios remain blocked.
+- All-36 **PM-01 v2** 10%-gross replay SHA:
+  `38d9dd4bc0454eefbb6643f735055d9be5464487e44a5c9ad96f950566cdf13e`.
+  All 108 scenarios blocked.
+- Independently constructed **PM-01 whole-observed-book tape** SHA:
+  `7665a3b3a13ff35db418ad27965bee85b56a1156b4dec4379a3da295685510e9`.
+- Actual **PM-02** CLI accepted the corrected PM-01 v2
+  envelope, with five EMPTY seats, 0 R risk proposal, 0 qualified;
+  SHA `8ae5377b4b544c93f9fdb68fcb8e4f5dd7bcd526ac10ebb4c7d0eb8d3fdcf56d`.
+- Actual **PM-03 handoff** provenance and risk gate SHA:
+  `9898676e3c71a7784fd9c6663f0b6b40de9abb74255f076e754923a413394b24`.
+  Result: `RESEARCH_ENGINEERING_CONTRACT_VALID_PROSPECTIVE_BLOCKED`.
+- Tested direct on the 36-wallet portfolio branch:
+  `uv run --group dev python -m pytest -q tests`:
+  **179 passed, 2 skipped**, Ruff lint passed.
+
 ## Non-negotiable caveats and unfinished PM-01 gates
 
 1. **Vendor-listed-book is not whole Hyperliquid exchange account:** the vendor's current 90-day instrument roster may omit prior-only instruments, vault/DEX account scopes, funding/collateral/cash changes and liquidation economics. Initial signed exposure derives from reported per-instrument source fill `start_position`; there is no verified source account equity or account PnL reconciliation. All allocations are whole-**observed**-book only.

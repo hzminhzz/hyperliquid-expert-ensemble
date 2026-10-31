@@ -457,7 +457,9 @@ def replay_wallet(
     except MarketDataBlocked as exc:
         return {**history, "status": "BLOCKED_TERMINAL_MARK", "reason": str(exc), "pnl": None}
     attributed = follower.pnl_by_instrument(terminal)
+    control_attributed = baseline.pnl_by_instrument(terminal)
     pnl = sum(attributed.values(), ZERO)
+    control_pnl = sum(control_attributed.values(), ZERO)
     cash = capital + sum(follower.flows.values(), ZERO)
     marked = sum((qty * terminal[name] for name, qty in follower.positions.items()), ZERO)
     if abs(cash + marked - capital - pnl) > Decimal("0.00000001"):
@@ -473,12 +475,30 @@ def replay_wallet(
         "status": "HISTORICAL_HINDSIGHT_SIMULATION_ONLY",
         "pnl": str(pnl),
         "return_on_initial_capital": str(pnl / capital),
-        "matched_long_only_market_control_pnl": str(
-            sum(baseline.pnl_by_instrument(terminal).values(), ZERO)
-        ),
-        "incremental_vs_matched_long_control": str(
-            pnl - sum(baseline.pnl_by_instrument(terminal).values(), ZERO)
-        ),
+        "matched_long_only_market_control_pnl": str(control_pnl),
+        "incremental_vs_matched_long_control": str(pnl - control_pnl),
+        "follower_pnl_by_instrument": {
+            name: str(value) for name, value in sorted(attributed.items())
+        },
+        "market_only_pnl_by_instrument": {
+            name: str(value) for name, value in sorted(control_attributed.items())
+        },
+        "accounting": {
+            "hypothetical_initial_capital": str(capital),
+            "final_virtual_cash": str(cash),
+            "terminal_open_position_mtm": str(marked),
+            "portfolio_pnl_matches_instrument_ledger": True,
+            "portfolio_pnl_matches_cash_and_mtm": True,
+            "source_account_reconciled": False,
+            "actual_broker_reconciled": False,
+        },
+        "cost_assumptions": {
+            "taker_fee_bps": str(model.taker_fee_bps),
+            "spread_bps": str(model.spread_bps),
+            "slippage_bps": str(model.slippage_bps),
+            "funding_abs_bps_per_8h": str(model.funding_abs_bps_per_8h),
+            "max_minute_participation_fraction": str(model.max_minute_participation),
+        },
         "fees": str(follower.fees),
         "funding_assumed": str(follower.funding),
         "spread_slippage": str(follower.impact),
@@ -544,7 +564,10 @@ def run(
         cutoff=CUT.isoformat(),
     )
     return {
-        "schema": "pm01_fill_only_replay_v3",
+        # Preserve the version-2 shape consumed by the separately developed
+        # PM-02 manager research. New cards are additive extension fields.
+        "schema": "pm01_fill_only_replay_v2",
+        "extensions": ["pm01_fill_only_36_evidence_cards_v1"],
         "whole_wallet_candidate_cards": evidence_cards["example_wallets"],
         "wallet_evidence_cards": evidence_cards["cards"],
         "prospective_qualified_wallet_count": evidence_cards["qualified_prospective_wallets"],
