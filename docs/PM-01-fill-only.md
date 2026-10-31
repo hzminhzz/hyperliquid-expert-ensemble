@@ -340,6 +340,56 @@ feasibility against qualified PMs yet.
   `uv run --group dev python -m pytest -q tests`:
   **179 passed, 2 skipped**, Ruff lint passed.
 
+### 2026-10-31 HyperX account-state triage — source gap W035/W041
+
+The owner-authorized read-only HyperX **Data API** exposes separate
+`POST /wallet_analysis/{address}`, `GET /market/trader-funding/{address}`
+and `GET /market/trader-margin-timeline/{address}` endpoints. A new
+`ensemble.pm_hyperx_account_triage` uses the pinned HyperX Data API
+credential, allows **at most two aliases and three bounded endpoints per
+invocation** (weight upper bound 14), validates exact source address and
+source schema, and stores separate immutable private bytes and SHA-256
+without modifying original wallet fill caches or source code.
+
+Authenticated requests for the two critical *post-anchor gap* wallets:
+
+| Wallet | Wallet-analysis leverage points | Asset-flow event count | Funding first-page records | Funding has more | Margin timeline |
+| --- | ---: | ---: | ---: | --- | --- |
+| W035 (HBAR break) | 20 | 15 | 100 | yes | 7 days, 733 points |
+| W041 (AVAX break) | 20 | 25 | 100 | yes | 7 days, 733 points |
+
+The vendor's broad `wallet_analysis` date envelope does **not** imply a
+full historic account-position journal. The funding endpoint is **paginated**
+and the first 100 records do **not** cover the entire claimed 30-day
+source window, let alone the frozen five months. The margin endpoint is
+limited to seven recent days; the sparse 20-point historical leverage
+summaries do not resolve per-coin missing position transitions.
+Accordingly both wallet source gaps, account collateral, equity, funding
+and true first-known clocks remain **UNRECONCILED**.
+
+Private content-addressed triage summary SHA:
+`338e131f56d7c1f4155d908f2e8ce62cdf384b5f092bba8ac24ff9ffb1d00155`.
+Raw vendor replies reside in owner-private
+`/home/quant/.local/share/copytrade/reports/pm01-hyperx-account/g20261031t0205a/`.
+No wallet address or API token is committed to Git.
+
+To repeat with a different **new** generation, use bounded direct
+research-only authentication:
+
+```bash
+PYTHONPATH=src /home/quant/dev/quant/ml4t-data/.venv/bin/python \
+  -m ensemble.pm_hyperx_account_triage \
+  --research-root /home/quant/.local/share/copytrade/reports/five-pod-20261029-research \
+  --generation /home/quant/.local/share/copytrade/reports/pm01-hyperx-account/gNEW_UNIQUE_GENERATION \
+  --out /home/quant/.local/share/copytrade/reports/pm01-36-shadow \
+  --aliases W035 W041
+```
+
+The output is evidence of partial vendor accounting fields, **not**
+retroactive first-known account state or proof that historical gaps can
+be corrected. Continue to fail closed until a fully source-attested
+whole-account position and funding/collateral history is available.
+
 ## Non-negotiable caveats and unfinished PM-01 gates
 
 1. **Vendor-listed-book is not whole Hyperliquid exchange account:** the vendor's current 90-day instrument roster may omit prior-only instruments, vault/DEX account scopes, funding/collateral/cash changes and liquidation economics. Initial signed exposure derives from reported per-instrument source fill `start_position`; there is no verified source account equity or account PnL reconciliation. All allocations are whole-**observed**-book only.
