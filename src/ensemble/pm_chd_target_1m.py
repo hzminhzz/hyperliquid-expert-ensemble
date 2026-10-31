@@ -18,6 +18,38 @@ import sys
 import time
 
 from .pm_research import _write_private_evidence
+from .pm_propr_scope import SCOPE_STRICT, SCOPE_TENTATIVE
+
+
+def _propr_allowlist(scope: dict, audit_sha: str, policy: str) -> set[tuple[str, str]]:
+    """Read-only market acquisition guard: Propr display scope, not order eligibility."""
+    if scope.get("schema") != "pm01_propr_scoped_90pct_market_readiness_v1":
+        raise ValueError("UNVERIFIED_PROPR_SCOPED_SOURCE")
+    if scope.get("source_cohort_wallet_count") != 36:
+        raise ValueError("INCOMPLETE_PROPR_WALLET_COHORT")
+    if scope.get("input_files_sha256", {}).get("market_1m_audit") != audit_sha:
+        raise ValueError("PROPR_SCOPE_AUDIT_SHA_MISMATCH")
+    if policy not in {"strict", "candidate"}:
+        raise ValueError("INVALID_PROPR_ACQUISITION_POLICY")
+    metric = scope.get("market_day_coverage", {}).get(
+        "strict_native_crypto_display"
+        if policy == "strict"
+        else "strict_plus_tentative_xyz_display"
+    )
+    if not isinstance(metric, dict) or metric.get("target") != 0.90:
+        raise ValueError("UNVERIFIED_PROPR_90_PERCENT_TARGET")
+    if metric.get("target_reached") is True:
+        raise ValueError("PROPR_90_PERCENT_DATA_TARGET_ALREADY_MET")
+    permitted_scope = {SCOPE_STRICT}
+    if policy == "candidate":
+        permitted_scope.add(SCOPE_TENTATIVE)
+    return {
+        (r["provider_symbol"], r["date_utc"])
+        for r in scope["propr_only_priority_market_acquisition_queue"]
+        if r["scope"] in permitted_scope
+        and r["status"] == "MISSING_NATIVE_MARKET_DAY"
+        and r["allowed_for_market_data_acquisition"] is True
+    }
 
 
 def _day_grid_quality(meta: dict) -> dict:
@@ -46,6 +78,8 @@ def fetch_days(
     targets: tuple[tuple[str, str], ...],
     max_days: int = 3,
     mode: str = "candles",
+    propr_scope: Path | None = None,
+    propr_policy: str = "strict",
 ) -> dict:
     if not 1 <= max_days <= 5 or not targets or len(targets) > max_days:
         raise ValueError("CHD_REQUEST_BUDGET_EXCEEDED")
@@ -63,6 +97,24 @@ def fetch_days(
     }
     if len(set(targets)) != len(targets) or any(x not in permitted for x in targets):
         raise ValueError("TARGET_NOT_IN_SHA_AUDITED_MISSING_DAY_QUEUE")
+    scope_details = None
+    if propr_scope is not None:
+        raw = propr_scope.read_bytes()
+        digest = sha256(raw).hexdigest()
+        if propr_scope.name != f"pm01-36-wallets-{digest[:20]}.json":
+            raise ValueError("UNSEALED_PROPR_SCOPE_EVIDENCE")
+        scope = json.loads(raw)
+        allowed_propr = _propr_allowlist(
+            scope, sha256(audit.read_bytes()).hexdigest(), propr_policy
+        )
+        if any(x not in allowed_propr for x in targets):
+            raise ValueError("OUT_OF_SCOPE_FOR_PROPR_DATA_ACQUISITION")
+        scope_details = {
+            "propr_scope_sha256": digest,
+            "policy": propr_policy,
+            "target": 0.90,
+            "order_acceptance_proven": False,
+        }
     previous = Path.cwd()
     sys.path.insert(0, str(ml4t_root))
     try:
@@ -183,6 +235,7 @@ def fetch_days(
         "wallet_source_fills_untouched": True,
         "owner": "ml4t-data canonical storage",
         "planned_max_day_requests": max_days,
+        "propr_market_only_scope": scope_details,
         "targets": verified,
     }
 
@@ -195,6 +248,8 @@ def main():
     p.add_argument("--target", action="append", required=True)
     p.add_argument("--max-days", type=int, default=3)
     p.add_argument("--mode", choices=["candles", "trades"], default="candles")
+    p.add_argument("--propr-scope", type=Path)
+    p.add_argument("--propr-policy", choices=["strict", "candidate"], default="strict")
     args = p.parse_args()
     pairs = []
     for record in args.target:
@@ -204,7 +259,15 @@ def main():
         if not sym or not day:
             raise ValueError("INVALID_SOURCE_TARGET")
         pairs.append((sym, day))
-    report = fetch_days(args.ml4t_root, args.audit, tuple(pairs), args.max_days, args.mode)
+    report = fetch_days(
+        args.ml4t_root,
+        args.audit,
+        tuple(pairs),
+        args.max_days,
+        args.mode,
+        args.propr_scope,
+        args.propr_policy,
+    )
     evidence, hash_value = _write_private_evidence(args.out, report)
     print(
         json.dumps(

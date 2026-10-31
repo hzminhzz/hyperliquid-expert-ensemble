@@ -230,6 +230,18 @@ def inventory(research_root: Path, market_root: Path) -> dict:
         "local_tick_candidate_count": len(local_tick_candidates),
         "acquisition_requests_are_not_provider_availability_claims": True,
         "missing_or_invalid_instrument_day_queue": acquisition_queue,
+        # Additive completeness manifest: the old queue only contains failures,
+        # so a market-scoped denominator cannot be reconstructed from it.
+        # All required unique instrument/UTC-day pairs are included, allowing
+        # research-specific coverage filtering without changing source facts.
+        "instrument_day_inventory": [
+            {
+                "instrument": instrument,
+                "date_utc": day,
+                "status": status,
+            }
+            for (instrument, day), status in sorted(per_day_cache.items())
+        ],
         "wallet_count": len(entries),
         "source_manifest_shas": fingerprints,
         "input": "HYPERX_FILLS_ONLY_RUST_INDEPENDENT",

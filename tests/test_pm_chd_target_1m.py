@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from ensemble.pm_chd_target_1m import fetch_days, _day_grid_quality
+from ensemble.pm_chd_target_1m import fetch_days, _day_grid_quality, _propr_allowlist
+from ensemble.pm_propr_scope import SCOPE_STRICT, SCOPE_TENTATIVE
 
 
 def test_day_sha_is_not_completeness_or_executable_capacity():
@@ -53,6 +55,62 @@ def _audit(tmp_path: Path):
         )
     )
     return target
+
+
+def _propr_scope(tmp_path: Path, audit: Path):
+    source = {
+        "schema": "pm01_propr_scoped_90pct_market_readiness_v1",
+        "source_cohort_wallet_count": 36,
+        "input_files_sha256": {"market_1m_audit": sha256(audit.read_bytes()).hexdigest()},
+        "market_day_coverage": {
+            "strict_native_crypto_display": {"target": 0.90, "target_reached": False},
+            "strict_plus_tentative_xyz_display": {"target": 0.90, "target_reached": False},
+        },
+        "propr_only_priority_market_acquisition_queue": [
+            {
+                "provider_symbol": "ALGO",
+                "date_utc": "2026-10-29",
+                "status": "MISSING_NATIVE_MARKET_DAY",
+                "scope": SCOPE_STRICT,
+                "allowed_for_market_data_acquisition": True,
+            },
+            {
+                "provider_symbol": "xyz:AMD",
+                "date_utc": "2026-10-28",
+                "status": "MISSING_NATIVE_MARKET_DAY",
+                "scope": SCOPE_TENTATIVE,
+                "allowed_for_market_data_acquisition": True,
+            },
+        ],
+    }
+    raw = (json.dumps(source, sort_keys=True) + "\n").encode()
+    path = tmp_path / f"pm01-36-wallets-{sha256(raw).hexdigest()[:20]}.json"
+    path.write_bytes(raw)
+    return path, source
+
+
+def test_propr_limit_blocks_wasted_out_of_market_day_fetch_before_sdk(tmp_path):
+    audit = _audit(tmp_path)
+    path, scope = _propr_scope(tmp_path, audit)
+    with pytest.raises(ValueError, match="OUT_OF_SCOPE_FOR_PROPR_DATA_ACQUISITION"):
+        fetch_days(tmp_path, audit, (("POL", "2026-10-28"),), 1, "trades", path, "strict")
+    with pytest.raises(ValueError, match="PROPR_SCOPE_AUDIT_SHA_MISMATCH"):
+        _propr_allowlist(scope, "f" * 64, "strict")
+    strict_allowed = _propr_allowlist(scope, sha256(audit.read_bytes()).hexdigest(), "strict")
+    assert strict_allowed == {("ALGO", "2026-10-29")}
+    candidate_allowed = _propr_allowlist(scope, sha256(audit.read_bytes()).hexdigest(), "candidate")
+    assert ("xyz:AMD", "2026-10-28") in candidate_allowed
+    scope["market_day_coverage"]["strict_native_crypto_display"]["target_reached"] = True
+    with pytest.raises(ValueError, match="PROPR_90_PERCENT_DATA_TARGET_ALREADY_MET"):
+        _propr_allowlist(scope, sha256(audit.read_bytes()).hexdigest(), "strict")
+
+
+def test_unsealed_propr_scope_cannot_authorize_any_provider_call(tmp_path):
+    audit = _audit(tmp_path)
+    path, _ = _propr_scope(tmp_path, audit)
+    path.write_bytes(path.read_bytes() + b" ")
+    with pytest.raises(ValueError, match="UNSEALED_PROPR_SCOPE_EVIDENCE"):
+        fetch_days(tmp_path, audit, (("ALGO", "2026-10-29"),), 1, "trades", path, "strict")
 
 
 def test_no_external_provider_on_unapproved_market_day(tmp_path):

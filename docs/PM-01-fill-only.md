@@ -1,6 +1,6 @@
 # PM-01 — Fill-only historical replay (36 Hyperliquid wallets)
 
-**Latest direct-execution forensic report:** [2026-10-31 source recovery, liquidity and first-local-receipt audit](PM-01-2026-10-31-direct-execution.md). Its 1,519/2,433 market-day figure supersedes older day-count snapshots below; the scientific qualification gate remains **BLOCKED_EVIDENCE**.
+**Current Propr-specific scope:** [2026-10-31 Propr 90% native market-data target and scoped acquisition](PM-01-propr-90pct-scope.md). It supersedes broad-universe acquisition milestones below: 1,036/1,289 strict Propr crypto days or 1,522/1,990 with tentative HIP-3 after 17 scoped native-day backfills. Four nonhedged, source-gap-free research candidates (W048/W026/W047/VS033) now independently exceed 90% of their own strict Propr crypto day requirements. [Prior direct execution and liquidity audit](PM-01-2026-10-31-direct-execution.md) remains a historical snapshot. Scientific PM qualification is still **BLOCKED_EVIDENCE**.
 
 **Authoritative research inputs:** private, immutable HyperX fills for the full **6 original + 10 Wave 1 + 20 Wave 2** cohort, and validated **native Hyperliquid** 1-minute OHLCV from the user's ml4t-data lake. The independent Rust observation tracker is **not** a PM-01 data source, gating criterion, or dependency. Missing Rust observations for 14 aliases must not disqualify their fill-based research.
 
