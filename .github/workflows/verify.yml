@@ -1,0 +1,35 @@
+name: Ensemble engineering verification
+
+on:
+  pull_request:
+    branches:
+      - main
+      - feat/expert-wallet-execution-correctness-prospective-research
+  push:
+    branches:
+      - feat/trader-intelligence-grade-shadow-20261102
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install pinned uv
+        run: python -m pip install uv==0.12.15
+      - name: Sync locked dependencies
+        run: uv sync --frozen --group dev
+      - name: Full test suite
+        run: uv run --frozen --group dev python -m pytest -q tests
+      - name: Ruff lint
+        run: uv run --frozen --group dev ruff check src tests
+      - name: Changed adapter formatting
+        run: uv run --frozen --group dev ruff format --check src/ensemble/trader_grade_adapter.py tests/test_trader_grade_adapter.py
+      - name: Wheel and source distribution
+        run: uv build
