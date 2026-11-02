@@ -20,6 +20,7 @@ from typing import Any
 
 from .copy_board import build_trade_flow_board, render_flow_digest
 from .copy_forward import FORWARD_DB, PROTOCOL, ForwardStore, FrozenEvidence, record_hourly
+from .trader_grade_adapter import grade_appendix, inspect_grade_artifact
 
 DATA=Path("/home/quant/.local/share/copytrade")
 
@@ -59,6 +60,10 @@ def publish_digest(
     protocol_path:Path=PROTOCOL,
     price_db:Path=DATA/"market-reference.db",
     receipt_clock:Callable[[],datetime]|None=None,
+    grade_artifact:Path|None=None,
+    grade_model_sha256:str|None=None,
+    grade_policy_sha256:str|None=None,
+    grade_display_enabled:bool=False,
 ) -> dict[str,Any]:
     if now.tzinfo is None:
         raise ValueError("timezone-aware time required")
@@ -132,6 +137,21 @@ def publish_digest(
                                 "reason":type(err).__name__}
         # A period ID helps operators reconcile ambiguous Telegram retries.
         message=render_flow_digest(board,recent_board)+f"\nDigest: <code>{key}</code>"
+        grade_status="DISABLED"
+        if grade_artifact is not None:
+            overlay=inspect_grade_artifact(
+                grade_artifact,board=board,recent_board=recent_board,now=now,
+                expected_model_sha256=grade_model_sha256 or "",
+                expected_policy_sha256=grade_policy_sha256 or "",
+            )
+            grade_status="FALLBACK_DESCRIPTIVE" if overlay is None else "VALID_SHADOW"
+            if overlay is not None and grade_display_enabled:
+                appendix=grade_appendix(overlay)
+                if appendix and len(message)+len(appendix)<=3800:
+                    message+=appendix
+                    grade_status="RESEARCH_OVERLAY"
+                elif appendix:
+                    grade_status="FALLBACK_DISPLAY_LIMIT"
         if forward_result["status"] in ("RECORDED_RESEARCH_ONLY","ALREADY_RECORDED"):
             from html import escape
 
@@ -208,6 +228,7 @@ def publish_digest(
             "predictive_qualified":False,
             "forward_capture":forward_result["status"],
             "forward_ack_recorded":recorded,
+            "grade_status":grade_status,
         }
 
 
