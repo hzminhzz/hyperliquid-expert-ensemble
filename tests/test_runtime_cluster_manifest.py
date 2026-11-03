@@ -53,6 +53,7 @@ def test_feed_gap_invalidates_previously_known_flat_wallet(tmp_path: Path) -> No
         ledger_db=tmp_path/"ledger.db",
         projection_db=tmp_path/"projection.db",
         health_path=tmp_path/"health.json",
+        price_checkpoint_db=tmp_path/"market-reference.db",
         experts=[wallet,active],
     ))
     try:
@@ -91,6 +92,7 @@ def test_runtime_uses_cluster_budget_not_wallet_count(tmp_path: Path) -> None:
             ledger_db=tmp_path / "ledger.db",
             projection_db=tmp_path / "projection.db",
             health_path=tmp_path / "health.json",
+            price_checkpoint_db=tmp_path / "market-reference.db",
             experts=experts,
             cluster_manifest_path=manifest,
         )

@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import sqlite3
+import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from typing import Any
 
 from .copy_board import build_trade_flow_board, render_flow_digest
 from .copy_forward import FORWARD_DB, PROTOCOL, ForwardStore, FrozenEvidence, record_hourly
+from .trader_grade_adapter import grade_appendix, inspect_grade_artifact
 
 DATA=Path("/home/quant/.local/share/copytrade")
 
@@ -59,9 +61,17 @@ def publish_digest(
     protocol_path:Path=PROTOCOL,
     price_db:Path=DATA/"market-reference.db",
     receipt_clock:Callable[[],datetime]|None=None,
+    grade_artifact:Path|None=None,
+    grade_model_sha256:str|None=None,
+    grade_policy_sha256:str|None=None,
+    grade_display_enabled:bool=False,
+    grade_research_enabled:bool=False,
+    grade_research_builder:Callable[...,dict]|None=None,
 ) -> dict[str,Any]:
     if now.tzinfo is None:
         raise ValueError("timezone-aware time required")
+    if grade_research_enabled and grade_artifact is not None:
+        raise ValueError("CONFLICTING_GRADE_PRODUCERS")
     if not journal_db.exists() or not source_db.exists():
         return {"status":"BLOCKED_NO_SOURCE"}
     if not token or not chat_id:
@@ -132,6 +142,60 @@ def publish_digest(
                                 "reason":type(err).__name__}
         # A period ID helps operators reconcile ambiguous Telegram retries.
         message=render_flow_digest(board,recent_board)+f"\nDigest: <code>{key}</code>"
+        grade_status="DISABLED"
+        if grade_research_enabled:
+            try:
+                if grade_research_builder is None:
+                    from .trader_grade_producer import build_research_grades
+
+                    grade_research_builder=build_research_grades
+                document=grade_research_builder(
+                    journal_db=journal_db,board=board,recent_board=recent_board,now=now,
+                )
+                with tempfile.TemporaryDirectory(prefix="ti-grade-") as directory:
+                    candidate=Path(directory)/"grade.json"
+                    candidate.write_text(
+                        json.dumps(document,sort_keys=True,separators=(",",":"),allow_nan=False),
+                        encoding="utf-8",
+                    )
+                    overlay=inspect_grade_artifact(
+                        candidate,board=board,recent_board=recent_board,now=now,
+                        expected_model_sha256=grade_model_sha256 or "",
+                        expected_policy_sha256=grade_policy_sha256 or "",
+                    )
+                if overlay is None:
+                    grade_status="FALLBACK_INVALID_RESEARCH_GRADE"
+                else:
+                    appendix=grade_appendix(overlay)
+                    if not appendix:
+                        appendix=(
+                            "\n<b>TRADER INTELLIGENCE — RESEARCH C/X ONLY</b>"
+                            "\nNo fresh grade-eligible directional watches at this cut."
+                            "\nA/B unqualified; risk allocation 0R; no trade authorization."
+                        )
+                    if len(message)+len(appendix)<=3800:
+                        message+=appendix
+                        grade_status="RESEARCH_CX_OVERLAY" if overlay else "RESEARCH_CX_NO_CANDIDATE"
+                    else:
+                        grade_status="FALLBACK_RESEARCH_DISPLAY_LIMIT"
+            except Exception as err:  # noqa: BLE001
+                # Preserve the existing descriptive alert when the experimental
+                # research dependency or journal fails. Do not expose source data.
+                grade_status="FALLBACK_RESEARCH_"+type(err).__name__
+        if grade_artifact is not None:
+            overlay=inspect_grade_artifact(
+                grade_artifact,board=board,recent_board=recent_board,now=now,
+                expected_model_sha256=grade_model_sha256 or "",
+                expected_policy_sha256=grade_policy_sha256 or "",
+            )
+            grade_status="FALLBACK_DESCRIPTIVE" if overlay is None else "VALID_SHADOW"
+            if overlay is not None and grade_display_enabled:
+                appendix=grade_appendix(overlay)
+                if appendix and len(message)+len(appendix)<=3800:
+                    message+=appendix
+                    grade_status="RESEARCH_OVERLAY"
+                elif appendix:
+                    grade_status="FALLBACK_DISPLAY_LIMIT"
         if forward_result["status"] in ("RECORDED_RESEARCH_ONLY","ALREADY_RECORDED"):
             from html import escape
 
@@ -208,6 +272,7 @@ def publish_digest(
             "predictive_qualified":False,
             "forward_capture":forward_result["status"],
             "forward_ack_recorded":recorded,
+            "grade_status":grade_status,
         }
 
 
@@ -221,6 +286,8 @@ def main() -> None:
     parser.add_argument("--protocol",type=Path,default=PROTOCOL)
     parser.add_argument("--forward",type=Path,default=FORWARD_DB)
     parser.add_argument("--prices",type=Path,default=DATA/"market-reference.db")
+    parser.add_argument("--ti-research-overlay",action="store_true",
+                        help="Opt in C/X-only as-known Trader Intelligence research appendix")
     args=parser.parse_args()
     now=datetime.now(UTC)
     if not args.send:
@@ -242,6 +309,9 @@ def main() -> None:
         now=now,token=os.getenv("TELEGRAM_BOT_TOKEN"),chat_id=chat,
         capture_forward=args.capture_forward,forward_db=args.forward,
         protocol_path=args.protocol,price_db=args.prices,
+        grade_research_enabled=args.ti_research_overlay,
+        grade_model_sha256=os.getenv("COPYTRADE_TI_MODEL_SHA256"),
+        grade_policy_sha256=os.getenv("COPYTRADE_TI_POLICY_SHA256"),
     )
     print(json.dumps(result,sort_keys=True))
 
