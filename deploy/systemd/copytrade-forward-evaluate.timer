@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic frozen hourly forward outcome maturation
+
+[Timer]
+OnBootSec=4min
+OnUnitInactiveSec=10min
+AccuracySec=20s
+Persistent=false
+Unit=copytrade-forward-evaluate.service
+
+[Install]
+WantedBy=timers.target

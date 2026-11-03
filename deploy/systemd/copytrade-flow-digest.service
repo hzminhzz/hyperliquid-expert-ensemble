@@ -1,0 +1,19 @@
+[Unit]
+Description=Copytrade observed-flow intelligence digest (descriptive, no orders)
+After=copytrade-opportunity-shadow.service
+Wants=copytrade-opportunity-shadow.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/quant/dev/hyperliquid-expert-ensemble
+EnvironmentFile=/home/quant/dev/hyperliquid-expert-ensemble/.env
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/home/quant/dev/hyperliquid-expert-ensemble/.venv/bin/python -m ensemble.copy_digest --send --capture-forward
+NoNewPrivileges=true
+MemoryHigh=64M
+MemoryMax=128M
+CPUQuota=15%
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=55
