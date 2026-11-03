@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
 from ensemble.copy_board import build_trade_flow_board
 from ensemble.copy_digest import publish_digest
 from ensemble.trader_grade_adapter import (
@@ -234,3 +236,146 @@ def test_telegram_opt_in_test_render_and_fallback(tmp_path):
     assert result["grade_status"] == "FALLBACK_DESCRIPTIVE"
     assert "grade C" not in fallback[0]
     assert "NOT a copy/entry signal" in fallback[0]
+
+
+def test_research_grade_pipeline_appends_cx_and_preserves_dedup(tmp_path):
+    source, journal = databases(tmp_path)
+    _, _, doc = grade_document(journal)
+    sent = []
+    result = publish_digest(
+        journal_db=journal,
+        source_db=source,
+        state_db=tmp_path / "cx.db",
+        now=CUT,
+        token="test",
+        chat_id="test",
+        send=lambda _t, _c, msg: sent.append(msg) or True,
+        grade_research_enabled=True,
+        grade_research_builder=lambda **_kwargs: doc,
+        grade_model_sha256=SHA,
+        grade_policy_sha256=SHA,
+    )
+    assert result["status"] == "DELIVERED_DESCRIPTIVE_ONLY"
+    assert result["grade_status"] == "RESEARCH_CX_OVERLAY"
+    assert len(sent) == 1
+    assert "rolling 4h" in sent[0]
+    assert "grade C (0R research max)" in sent[0]
+    assert "NOT a copy/entry signal" in sent[0]
+    assert (
+        publish_digest(
+            journal_db=journal,
+            source_db=source,
+            state_db=tmp_path / "cx.db",
+            now=CUT,
+            token="test",
+            chat_id="test",
+            send=lambda *_: (_ for _ in ()).throw(AssertionError("duplicated send")),
+            grade_research_enabled=True,
+            grade_research_builder=lambda **_kwargs: doc,
+            grade_model_sha256=SHA,
+            grade_policy_sha256=SHA,
+        )["status"]
+        == "ALREADY_DELIVERED"
+    )
+
+
+def test_research_grade_empty_candidate_and_invalid_pin_are_explicit(tmp_path):
+    source, journal = databases(tmp_path)
+    _, _, doc = grade_document(journal)
+    no_candidates = {**doc, "assessments": []}
+    sent = []
+    base = {
+        "journal_db": journal,
+        "source_db": source,
+        "now": CUT,
+        "token": "test",
+        "chat_id": "test",
+        "grade_research_enabled": True,
+        "grade_model_sha256": SHA,
+        "grade_policy_sha256": SHA,
+    }
+    empty = publish_digest(
+        **base,
+        state_db=tmp_path / "empty.db",
+        send=lambda _t, _c, msg: sent.append(msg) or True,
+        grade_research_builder=lambda **_kwargs: no_candidates,
+    )
+    assert empty["grade_status"] == "RESEARCH_CX_NO_CANDIDATE"
+    assert "No fresh grade-eligible directional watches" in sent[0]
+    assert "0R" in sent[0]
+    bad = publish_digest(
+        **{**base, "grade_model_sha256": "0" * 64},
+        state_db=tmp_path / "badpin.db",
+        send=lambda _t, _c, msg: sent.append(msg) or True,
+        grade_research_builder=lambda **_kwargs: doc,
+    )
+    assert bad["grade_status"] == "FALLBACK_INVALID_RESEARCH_GRADE"
+    assert "EXPERIMENTAL TRADER GRADES" not in sent[-1]
+
+
+def test_research_grade_failure_preserves_original_and_no_positive_display(tmp_path):
+    source, journal = databases(tmp_path)
+    _, _, doc = grade_document(journal)
+    doc["assessments"][0]["grade"] = "A"
+    doc["assessments"][0]["research_r"] = "1"
+    original = []
+    publish_digest(
+        journal_db=journal,
+        source_db=source,
+        state_db=tmp_path / "original.db",
+        now=CUT,
+        token="test",
+        chat_id="test",
+        send=lambda _t, _c, msg: original.append(msg) or True,
+    )
+    observed = []
+    bad = publish_digest(
+        journal_db=journal,
+        source_db=source,
+        state_db=tmp_path / "untrusted.db",
+        now=CUT,
+        token="test",
+        chat_id="test",
+        send=lambda _t, _c, msg: observed.append(msg) or True,
+        grade_research_enabled=True,
+        grade_research_builder=lambda **_kwargs: doc,
+        grade_model_sha256=SHA,
+        grade_policy_sha256=SHA,
+    )
+    assert bad["grade_status"] == "FALLBACK_INVALID_RESEARCH_GRADE"
+    assert observed == original
+
+    def broken(**_kwargs):
+        raise RuntimeError("unavailable research dependency")
+
+    observed.clear()
+    failure = publish_digest(
+        journal_db=journal,
+        source_db=source,
+        state_db=tmp_path / "broken.db",
+        now=CUT,
+        token="test",
+        chat_id="test",
+        send=lambda _t, _c, msg: observed.append(msg) or True,
+        grade_research_enabled=True,
+        grade_research_builder=broken,
+        grade_model_sha256=SHA,
+        grade_policy_sha256=SHA,
+    )
+    assert failure["grade_status"] == "FALLBACK_RESEARCH_RuntimeError"
+    assert observed == original
+
+
+def test_research_and_static_grade_producers_are_mutually_exclusive(tmp_path):
+    _, journal = databases(tmp_path)
+    with pytest.raises(ValueError, match="CONFLICTING_GRADE_PRODUCERS"):
+        publish_digest(
+            journal_db=journal,
+            source_db=journal,
+            state_db=tmp_path / "unused.db",
+            now=CUT,
+            token="test",
+            chat_id="test",
+            grade_research_enabled=True,
+            grade_artifact=tmp_path / "grade.json",
+        )
