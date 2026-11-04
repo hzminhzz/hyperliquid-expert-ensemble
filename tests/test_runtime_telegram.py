@@ -77,6 +77,16 @@ def test_pair_acknowledges_and_persists_chat_and_offset(tmp_path, monkeypatch):
     assert "financial execution is disabled" in sent[0][1].lower()
 
 
+def test_command_poll_connection_reset_is_nonfatal(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+
+    def reset(_request, timeout=10.0):
+        raise ConnectionResetError(104, "connection reset by peer")
+
+    monkeypatch.setattr("urllib.request.urlopen", reset)
+    _poll_telegram_commands(settings, status_text="healthy")
+
+
 def test_status_and_help_respond_only_to_paired_chat(tmp_path, monkeypatch):
     settings = _settings(tmp_path)
     settings.telegram_chat_id = "123456"

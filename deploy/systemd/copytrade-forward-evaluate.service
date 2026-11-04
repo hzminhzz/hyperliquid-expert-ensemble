@@ -1,0 +1,19 @@
+[Unit]
+Description=Copytrade frozen hourly forward outcomes (research-only mids)
+After=copytrade-opportunity-shadow.service
+Wants=copytrade-opportunity-shadow.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/quant/dev/hyperliquid-expert-ensemble
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/home/quant/dev/hyperliquid-expert-ensemble/.venv/bin/python -m ensemble.copy_forward_outcomes evaluate --limit 250
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+MemoryHigh=192M
+MemoryMax=384M
+CPUQuota=20%
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=90

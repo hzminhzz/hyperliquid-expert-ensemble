@@ -1,0 +1,18 @@
+[Unit]
+Description=Copytrade prospective raw-intent forward outcomes (shadow research only)
+After=network-online.target copytrade-tracker.service
+Wants=network-online.target copytrade-tracker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/quant/dev/hyperliquid-expert-ensemble
+Environment=PYTHONUNBUFFERED=1
+Environment=ENSEMBLE_LEDGER_DB=/home/quant/.local/share/copytrade/observation.db
+Environment=ENSEMBLE_OUTCOME_DB=/home/quant/.local/share/copytrade/outcomes.db
+ExecStart=/home/quant/dev/hyperliquid-expert-ensemble/.venv/bin/python -m ensemble.live_outcomes
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

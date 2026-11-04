@@ -33,6 +33,7 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["error"]

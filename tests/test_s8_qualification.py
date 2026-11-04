@@ -87,6 +87,7 @@ def create_mock_rust_ledger(db_path: Path, ledger_id: str = "ledger-v1") -> None
         VALUES ('ledger-v1', '2026-10-06T00:00:00Z', 0, 0)
         ON CONFLICT(ledger_id) DO NOTHING;
         """)
+        conn.execute("UPDATE ledger_meta SET ledger_id=?",(ledger_id,))
     conn.close()
 
 
