@@ -232,7 +232,7 @@ def grade_appendix(assessments: dict[tuple[str, str], dict]) -> str:
     """Escaped, bounded research overlay; never changes current decision policy."""
     if not assessments:
         return ""
-    lines = ["\n<b>EXPERIMENTAL TRADER GRADES — RESEARCH ONLY</b>"]
+    lines = ["\n🧪 <b>EXPERIMENTAL TRADER GRADES — RESEARCH ONLY</b>"]
     for (coin, direction), row in sorted(assessments.items())[:8]:
         if row["grade"] in ("A", "B") and row["claim_status"] != "VALIDATED":
             claim = "PROVISIONAL"
@@ -242,10 +242,15 @@ def grade_appendix(assessments: dict[tuple[str, str], dict]) -> str:
         clusters = (
             "unknown" if row["independent_clusters"] is None else str(row["independent_clusters"])
         )
+        icon = {"A":"🟢","B":"🟡","C":"⚪","X":"🔴"}[row["grade"]]
+        arrow = "↗" if direction=="LONG" else "↘"
+        label = {"A":"HIGH CONVICTION","B":"QUALIFIED","C":"WATCH","X":"REJECT"}[row["grade"]]
         lines.append(
-            f"• {escape(coin)} {direction}: grade {row['grade']} "
-            f"({row['research_r']}R research max), {claim}; "
-            f"independent clusters {clusters}; {reasons}"
+            f"{icon} <b>{escape(coin)} {arrow} {direction} · {label}</b> — "
+            f"grade {row['grade']} ({row['research_r']}R research max), "
+            f"{escape(str(claim))}; independent clusters {clusters}; "
+            f"{reasons}"
         )
+    lines.append("🔒 <i>C/X are research-only (0R). A/B not currently qualified.</i>")
     lines.append("Not an order, stop, account-level risk approval, or live trading signal.")
     return "\n".join(lines)

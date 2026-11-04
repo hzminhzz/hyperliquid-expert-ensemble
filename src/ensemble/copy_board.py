@@ -186,7 +186,7 @@ def render_flow_digest(
 ) -> str:
     """Hourly delivery; 4h flow context and optional 1h flow update."""
     if board.get("status") != "DESCRIPTIVE_ONLY_INDEPENDENCE_NOT_QUALIFIED":
-        return "Copytrade flow observation unavailable; no actionable signals."
+        return "⚪ <b>Copytrade flow observation unavailable</b> — no actionable signals."
     from zoneinfo import ZoneInfo
 
     ict=ZoneInfo("Asia/Bangkok")
@@ -194,39 +194,39 @@ def render_flow_digest(
     start=datetime.fromisoformat(str(board["window_start"])).astimezone(ict)
     window_hours=(end-start).total_seconds()/3600
     lines=[
-        "<b>HYPERLIQUID | HOURLY DIRECTIONAL WATCH</b>",
-        f"{end:%H:%M} ICT · {end:%d %b %Y}",
-        "<b>DESCRIPTIVE ONLY — NOT a copy/entry signal</b>",
-        f"Directional context: rolling {window_hours:g}h",
+        "📡 <b>HYPERLIQUID | HOURLY DIRECTIONAL WATCH</b>",
+        f"🕒 {end:%H:%M} ICT · {end:%d %b %Y}",
+        "⚠️ <b>DESCRIPTIVE ONLY — NOT a copy/entry signal</b>",
+        f"🧭 Directional context: rolling {window_hours:g}h",
     ]
     recent_by_coin={}
     if recent_board is not None:
         recent_by_coin={c["coin"]:c for c in recent_board.get("coins",[])}
         lines.append(
-            f"Last 1h: {recent_board['fresh_entry_events']} entries/adds · "
+            f"📊 Last 1h: {recent_board['fresh_entry_events']} entries/adds · "
             f"{recent_board['de_risk_events']} de-risk events"
         )
     else:
         lines.append(
-            f"Window: {board['fresh_entry_events']} entries/adds · "
+            f"📊 Window: {board['fresh_entry_events']} entries/adds · "
             f"{board['de_risk_events']} de-risk events"
         )
     if board["truncated"] or (recent_board is not None and recent_board["truncated"]):
-        lines.append("WARNING: truncated evidence window; totals incomplete.")
+        lines.append("⚠️ WARNING: truncated evidence window; totals incomplete.")
     if not board["coins"]:
-        lines.append("No new eligible trade observations in the window.")
-    for directions,title in (
-        ({"LONG_WATCH"},"LONG WATCH — dominant observed long entries"),
-        ({"SHORT_WATCH"},"SHORT WATCH — dominant observed short entries"),
-        ({"MIXED","CAUTION"},"CAUTION / MIXED — conflicting or unwinding"),
+        lines.append("⚪ No new eligible trade observations in the window.")
+    for directions,title,icon,arrow in (
+        ({"LONG_WATCH"},"LONG WATCH — dominant observed long entries","🟢","↗"),
+        ({"SHORT_WATCH"},"SHORT WATCH — dominant observed short entries","🔴","↘"),
+        ({"MIXED","CAUTION"},"CAUTION / MIXED — conflicting or unwinding","🟡","↔"),
     ):
         selection=[coin for coin in board["coins"]
                    if coin.get("observed_directional_bias") in directions][:3]
-        lines.append(f"\n<b>{title}</b>")
+        lines.append(f"\n{icon} <b>{title}</b>")
         if not selection:
-            lines.append("None met the descriptive threshold.")
+            lines.append("⚪ None met the descriptive threshold.")
         for coin in selection:
-            ticker=html.escape(str(coin["coin"]))
+            ticker=html.escape(str(coin["coin"])[:48])
             lean=coin.get("underlying_lean","")
             caution=f" ({lean.lower().replace('_watch','')}-leaning)" if coin[
                 "observed_directional_bias"
@@ -238,15 +238,15 @@ def render_flow_digest(
                 if recent is not None else ("; last 1h 0L/0S" if recent_board else "")
             )
             lines.append(
-                f"• {ticker}{caution}: {coin['long_entry_wallets']}L/"
-                f"{coin['short_entry_wallets']}S addresses (4h); "
+                f"  {arrow} <b>{ticker}{caution}</b> · "
+                f"<b>{coin['long_entry_wallets']}L/{coin['short_entry_wallets']}S</b> addresses (4h); "
                 f"reduce {coin['de_risk_wallets']}, exits {coin['exit_wallets']}"
                 f"{hour_detail}"
             )
     lines.extend([
-        "\nWatch threshold: 3+ addresses, at least 2:1 directional imbalance.",
-        "Addresses are NOT validated independent trader clusters.",
-        "Predictive edge: NOT QUALIFIED. Entry price/size: NOT AVAILABLE.",
-        "Shadow evidence only; no order is placed by this message.",
+        "\n🧭 Watch threshold: 3+ addresses, at least 2:1 directional imbalance.",
+        "👥 Addresses are NOT validated independent trader clusters.",
+        "🔒 <b>Predictive edge: NOT QUALIFIED.</b> Entry price/size: NOT AVAILABLE.",
+        "🧪 Shadow evidence only; no order is placed by this message.",
     ])
     return "\n".join(lines)
